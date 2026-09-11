@@ -3,6 +3,43 @@ import { createClient, type User } from "@supabase/supabase-js";
 export type Role = "student" | "registrar" | "osas" | "guidance" | "medical" | "scholarship" | "cashier" | "ict" | "admin";
 export type Office = "registrar" | "osas" | "guidance" | "medical" | "scholarship" | "cashier" | "ict";
 export type ReviewState = "not_started" | "submitted" | "under_review" | "returned" | "cleared";
+export type StudentType = "freshman" | "transferee" | "continuing" | "returning";
+
+export interface CampusReference { id: string; name: string }
+export interface ProgramReference { id: string; name: string; college: string; campusId: string; campusName?: string }
+export interface TermReference { id: string; academicYear: string; semester: string; status: string }
+export interface AcademicReferences { campuses: CampusReference[]; programs: ProgramReference[]; terms: TermReference[] }
+export interface AcademicSelection {
+  campusId: string | null;
+  programId: string | null;
+  termId: string | null;
+  studentType: StudentType;
+  yearLevel: number | null;
+}
+export interface SubjectSection {
+  id: string;
+  termId: string;
+  subjectId: string;
+  programId: string;
+  sectionCode: string;
+  code: string;
+  title: string;
+  units: number;
+  schedule: string;
+  room: string;
+  capacity: number;
+  enrolledCount: number;
+  scheduleData?: Array<{ day: string; start: string; end: string }> | null;
+}
+export interface AssignedSubject {
+  sectionId?: string;
+  sectionCode?: string;
+  code: string;
+  title: string;
+  units: number;
+  schedule: string;
+  room: string;
+}
 
 export interface Profile {
   id: string;
@@ -17,7 +54,7 @@ export type RegistrationResult =
   | { status: "confirmation_required"; email: string };
 
 export interface StudentForm {
-  studentType: "freshman" | "transferee" | "continuing" | "returning";
+  studentType: StudentType;
   academicStatus: "regular" | "irregular";
   campus: string;
   program: string;
@@ -39,12 +76,14 @@ export interface Enrollment {
   step: number;
   status: "draft" | "submitted" | "in_review" | "returned" | "confirmed";
   form: StudentForm;
+  academic: AcademicSelection;
+  academicIssue?: string;
   documents: Record<string, string>;
   offices: Record<Office, ReviewState>;
   remarks: Record<string, string>;
   payment: { status: "ready" | "submitted" | "verifying" | "confirmed" | "rejected"; proof?: string; receipt?: string };
   idStatus: "not_started" | "scheduled" | "captured" | "processing" | "ready" | "completed";
-  subjects: Array<{ code: string; title: string; units: number; schedule: string; room: string }>;
+  subjects: AssignedSubject[];
   updatedAt: string;
   events: Array<{ text: string; at: string }>;
 }
@@ -55,8 +94,8 @@ export const isSupabaseConfigured = Boolean(url && key);
 export const supabase = isSupabaseConfigured ? createClient(url!, key!) : null;
 
 const emptyForm: StudentForm = {
-  studentType: "freshman", academicStatus: "regular", campus: "Talisay", program: "BS Computer Science",
-  yearLevel: "1st Year", fullName: "", birthDate: "", gender: "", address: "", mobile: "", email: "",
+  studentType: "freshman", academicStatus: "regular", campus: "", program: "",
+  yearLevel: "", fullName: "", birthDate: "", gender: "", address: "", mobile: "", email: "",
   guardian: "", emergencyContact: "",
 };
 
@@ -66,8 +105,9 @@ const offices = (): Record<Office, ReviewState> => ({
 });
 
 const now = () => new Date().toISOString();
+const emptyAcademic = (): AcademicSelection => ({ campusId: null, programId: null, termId: null, studentType: "freshman", yearLevel: null });
 const createEnrollment = (userId: string, name = ""): Enrollment => ({
-  id: crypto.randomUUID(), userId, step: 1, status: "draft", form: { ...emptyForm, fullName: name }, documents: {},
+  id: crypto.randomUUID(), userId, step: 1, status: "draft", form: { ...emptyForm, fullName: name }, academic: emptyAcademic(), documents: {},
   offices: offices(), remarks: {}, payment: { status: "ready" }, idStatus: "not_started", subjects: [], updatedAt: now(),
   events: [{ text: "Enrollment draft created", at: now() }],
 });
@@ -91,7 +131,7 @@ const demoSeed = (): Enrollment[] => {
 const STORAGE_KEY = "chmsu-enrollment-demo-v2";
 export function readDemoEnrollments(): Enrollment[] {
   const raw = localStorage.getItem(STORAGE_KEY);
-  if (raw) return JSON.parse(raw) as Enrollment[];
+  if (raw) return (JSON.parse(raw) as Partial<Enrollment>[]).map(item => ({ ...item, form: { ...emptyForm, ...(item.form ?? {}) }, academic: item.academic ?? emptyAcademic(), documents: item.documents ?? {}, offices: { ...offices(), ...(item.offices ?? {}) }, remarks: item.remarks ?? {}, subjects: item.subjects ?? [], events: item.events ?? [] }) as Enrollment);
   const seeded = demoSeed();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(seeded));
   return seeded;
@@ -180,9 +220,31 @@ const legacyStatuses: Record<string, Enrollment["status"]> = {
   pending: "submitted", approved: "in_review", rejected: "returned", completed: "confirmed",
 };
 
+const isStudentType = (value: unknown): value is StudentType => ["freshman", "transferee", "continuing", "returning"].includes(String(value));
+const yearNumber = (value: unknown): number | null => {
+  const match = String(value ?? "").match(/[1-5]/);
+  return match ? Number(match[0]) : null;
+};
+const yearLabel = (value: number | null) => value ? `${value}${value === 1 ? "st" : value === 2 ? "nd" : value === 3 ? "rd" : "th"} Year` : "";
+
 const fromRow = (row: any): Enrollment => ({
   id: row.id, userId: row.student?.user_id ?? row.student_id, studentNumber: row.student_number ?? row.student?.student_number ?? undefined, step: row.current_step,
-  status: legacyStatuses[row.status] ?? row.status, form: { ...emptyForm, ...(row.form_data ?? {}) }, documents: row.documents ?? {}, offices: { ...offices(), ...(row.office_statuses ?? {}) },
+  status: legacyStatuses[row.status] ?? row.status,
+  form: (() => {
+    const data = { ...emptyForm, ...(row.form_data ?? {}) };
+    const studentType = isStudentType(row.student_type) ? row.student_type : isStudentType(data.studentType) ? data.studentType : "freshman";
+    const level = yearNumber(row.year_level ?? data.yearLevel);
+    return { ...data, studentType, campus: row.campus?.name ?? row.program?.campus?.name ?? data.campus ?? "", program: row.program?.name ?? data.program ?? "", yearLevel: yearLabel(level) };
+  })(),
+  academic: {
+    campusId: row.campus_id ?? row.program?.campus_id ?? row.program?.campus?.id ?? null,
+    programId: row.program_id ?? row.program?.id ?? null,
+    termId: row.term_id ?? row.term?.id ?? null,
+    studentType: isStudentType(row.student_type) ? row.student_type : isStudentType(row.form_data?.studentType) ? row.form_data.studentType : "freshman",
+    yearLevel: yearNumber(row.year_level ?? row.form_data?.yearLevel),
+  },
+  academicIssue: row.academic_review?.[0]?.details?.message,
+  documents: row.documents ?? {}, offices: { ...offices(), ...(row.office_statuses ?? {}) },
   remarks: row.remarks ?? {}, payment: { status: "ready", ...(row.payment ?? {}) }, idStatus: row.id_status ?? "not_started",
   subjects: row.assigned_subjects ?? [], updatedAt: row.updated_at, events: row.events ?? [],
 });
@@ -190,7 +252,7 @@ const fromRow = (row: any): Enrollment => ({
 export async function getEnrollments(profile: Profile): Promise<Enrollment[]> {
   if (!supabase) return readDemoEnrollments().filter(item => profile.role === "student" ? item.userId === profile.id : true);
   if (profile.role === "student") await initializeFreshmanAccount();
-  const query = supabase.from("enrollments").select("*,student:students!inner(user_id,student_number,full_name)").order("updated_at", { ascending: false });
+  const query = supabase.from("enrollments").select("*,student:students!inner(user_id,student_number,full_name),program:programs!left(id,name,college,campus_id,campus:campus!left(id,name)),term:academic_terms!left(id,academic_year,semester,status),campus:campus!left(id,name),academic_review:enrollment_academic_reviews!left(details,status)").order("updated_at", { ascending: false });
   const { data, error } = profile.role === "student" ? await query.eq("student.user_id", profile.id) : await query;
   if (error) throw error;
   return (data ?? []).map(fromRow);
@@ -198,12 +260,14 @@ export async function getEnrollments(profile: Profile): Promise<Enrollment[]> {
 
 export async function saveEnrollment(value: Enrollment, action = "save") {
   if (!supabase) return writeDemoEnrollment(value);
-  const payload = {
+  if (value.academic.programId && value.academic.campusId && value.academic.termId) await saveAcademicSelection(value);
+  const payload: Record<string, unknown> = {
     student_number: value.studentNumber ?? null, current_step: value.step,
     status: value.status, form_data: value.form, documents: value.documents, office_statuses: value.offices,
-    remarks: value.remarks, payment: value.payment, id_status: value.idStatus, assigned_subjects: value.subjects,
+    remarks: value.remarks, payment: value.payment, id_status: value.idStatus,
     events: value.events,
   };
+  if (action === "approve") Object.assign(payload, { assigned_subjects: value.subjects });
   const { error } = action === "save"
     ? await supabase.from("enrollments").update(payload).eq("id", value.id)
     : await supabase.rpc("transition_enrollment", { p_enrollment_id: value.id, p_action: action, p_payload: payload });
@@ -220,24 +284,88 @@ export async function uploadDocument(enrollmentId: string, office: string, file:
 }
 
 export async function getPrograms(): Promise<string[]> {
-  if (!supabase) return JSON.parse(localStorage.getItem("chmsu-programs") || "[\"BS Computer Science\",\"BS Information Technology\",\"BS Business Administration\"]") as string[];
+  if (!supabase) return (await getAcademicReferenceData()).programs.map(program => program.name);
   const { data, error } = await supabase.from("programs").select("name").eq("is_active", true).order("name");
   if (error) throw error;
   return (data ?? []).map(row => row.name);
 }
 
-export async function addProgram(name: string) {
-  if (!supabase) return;
-  const { data: campus } = await supabase.from("campus").select("id").limit(1).single();
-  if (!campus) throw new Error("Create at least one campus before adding a program.");
-  const { error } = await supabase.from("programs").insert({ name, college: "Unassigned", campus_id: campus.id });
+export async function addProgram(name: string, campusId: string) {
+  if (!supabase) {
+    const references = await getAcademicReferenceData();
+    const next = { id: `demo-program-${crypto.randomUUID()}`, name, college: "Unassigned", campusId, campusName: references.campuses.find(campus => campus.id === campusId)?.name };
+    localStorage.setItem("chmsu-academic-references", JSON.stringify({ ...references, programs: [...references.programs, next] }));
+    return;
+  }
+  const { error } = await supabase.from("programs").insert({ name, college: "Unassigned", campus_id: campusId });
   if (error) throw error;
 }
 
-export async function deactivateProgram(name: string) {
-  if (!supabase) return;
-  const { error } = await supabase.from("programs").update({ is_active: false }).eq("name", name);
+export async function deactivateProgram(programId: string) {
+  if (!supabase) {
+    const references = await getAcademicReferenceData();
+    localStorage.setItem("chmsu-academic-references", JSON.stringify({ ...references, programs: references.programs.filter(program => program.id !== programId) }));
+    return;
+  }
+  const { error } = await supabase.from("programs").update({ is_active: false }).eq("id", programId);
   if (error) throw error;
+}
+
+const demoReferences = (): AcademicReferences => ({
+  campuses: ["Talisay", "Alijis", "Fortune Towne", "Binalbagan"].map(name => ({ id: `demo-campus-${name.toLowerCase().replace(/ /g, "-")}`, name })),
+  programs: [
+    ["BS Computer Science", "College of Computer Studies", "Talisay"], ["BS Information Technology", "College of Computer Studies", "Talisay"],
+    ["BS Business Administration", "College of Business Management and Accountancy", "Talisay"], ["BS Criminology", "College of Criminal Justice", "Binalbagan"], ["Bachelor of Secondary Education", "College of Education", "Talisay"],
+  ].map(([name, college, campusName]) => ({ id: `demo-program-${name.toLowerCase().replace(/ /g, "-")}`, name, college, campusId: `demo-campus-${campusName.toLowerCase().replace(/ /g, "-")}`, campusName })),
+  terms: [{ id: "demo-term-2026-2", academicYear: "2026–2027", semester: "2nd Semester", status: "open" }],
+});
+
+export async function getAcademicReferenceData(): Promise<AcademicReferences> {
+  if (!supabase) {
+    const raw = localStorage.getItem("chmsu-academic-references");
+    return raw ? JSON.parse(raw) as AcademicReferences : demoReferences();
+  }
+  const [{ data: campuses, error: campusError }, { data: programs, error: programError }, { data: terms, error: termError }] = await Promise.all([
+    supabase.from("campus").select("id,name").order("name"),
+    supabase.from("programs").select("id,name,college,campus_id").eq("is_active", true).order("name"),
+    supabase.from("academic_terms").select("id,academic_year,semester,status").in("status", ["open", "published"]).order("start_date", { ascending: false }),
+  ]);
+  if (campusError) throw campusError; if (programError) throw programError; if (termError) throw termError;
+  const campusNames = new Map((campuses ?? []).map(campus => [campus.id, campus.name]));
+  return {
+    campuses: campuses ?? [],
+    programs: (programs ?? []).map(program => ({ ...program, campusId: program.campus_id, campusName: campusNames.get(program.campus_id) })),
+    terms: (terms ?? []).map(term => ({ id: term.id, academicYear: term.academic_year, semester: term.semester, status: term.status })),
+  };
+}
+
+export async function getSubjectSections(programId: string, termId: string): Promise<SubjectSection[]> {
+  if (!supabase) return [];
+  const { data, error } = await supabase.rpc("get_available_subject_sections", { p_program_id: programId, p_term_id: termId });
+  if (error) throw error;
+  return (data ?? []).map((row: any) => ({
+    id: row.id, termId: row.term_id, subjectId: row.subject_id, programId: row.program_id, sectionCode: row.section_code,
+    code: row.code, title: row.title, units: Number(row.units), schedule: row.schedule, room: row.room, capacity: row.capacity,
+    enrolledCount: row.enrolled_count, scheduleData: row.schedule_data,
+  }));
+}
+
+export async function saveAcademicSelection(value: Enrollment) {
+  if (!supabase) return;
+  if (!value.academic.programId || !value.academic.campusId || !value.academic.termId || !value.academic.yearLevel) throw new Error("Select a campus, matching program, enrollment term, and year level.");
+  const { error } = await supabase.rpc("save_enrollment_academics", {
+    p_enrollment_id: value.id, p_campus_id: value.academic.campusId, p_program_id: value.academic.programId,
+    p_term_id: value.academic.termId, p_student_type: value.academic.studentType, p_year_level: value.academic.yearLevel,
+    p_form_data: value.form,
+  });
+  if (error) throw error;
+}
+
+export async function assignSubjectSections(enrollmentId: string, sectionIds: string[]): Promise<AssignedSubject[]> {
+  if (!supabase) throw new Error("Curriculum and subject sections are not configured yet. Ask an administrator to publish sections for this term and program.");
+  const { data, error } = await supabase.rpc("assign_enrollment_subject_sections", { p_enrollment_id: enrollmentId, p_section_ids: sectionIds });
+  if (error) throw error;
+  return (data ?? []) as AssignedSubject[];
 }
 
 const specialRoleLabels: Partial<Record<Role, string>> = { ict: "ICT-MIS", osas: "OSAS", scholarship: "Scholarship Assessment" };
