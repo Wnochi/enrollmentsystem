@@ -1,0 +1,11 @@
+{
+  "title": "CHMSU Enrollment Hub",
+  "description": "Online enrollment, requirements, approvals, payments, and student records for Carlos Hilado Memorial State University.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
