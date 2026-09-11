@@ -54,9 +54,10 @@ function Portal({ profile, onExit }: { profile: Profile; onExit: () => void }) {
   const reload = () => getEnrollments(profile).then(setItems).finally(() => setLoading(false));
   useEffect(() => { void reload(); }, [profile.id]);
   useEffect(() => {
-    if (!supabase) return;
-    const channel = supabase.channel(`enrollments:${profile.id}`).on("postgres_changes", { event: "*", schema: "public", table: "enrollments" }, () => { void reload(); }).subscribe();
-    return () => { void supabase.removeChannel(channel); };
+    const client = supabase;
+    if (!client) return;
+    const channel = client.channel(`enrollments:${profile.id}`).on("postgres_changes", { event: "*", schema: "public", table: "enrollments" }, () => { void reload(); }).subscribe();
+    return () => { void client.removeChannel(channel); };
   }, [profile.id]);
   const persist = async (item: Enrollment, action = "save") => { await saveEnrollment(item, action); await reload(); };
   return <div className="app-shell"><aside className={mobile ? "sidebar open" : "sidebar"}><div className="logo"><div className="brand-mark small"><GraduationCap/></div><div><strong>CHMSU</strong><span>Enrollment Hub</span></div><button className="icon mobile-only" onClick={() => setMobile(false)}><X/></button></div><div className="term-card"><span>Enrollment period</span><strong>AY 2026–2027</strong><small>2nd Semester · Open</small></div><nav>{profile.role === "student" ? <><Nav icon={<LayoutDashboard/>} label="My enrollment"/><Nav icon={<FileText/>} label="Documents"/><Nav icon={<Bell/>} label="Updates"/></> : <><Nav icon={<Users/>} label="Processing queue"/><Nav icon={<ClipboardList/>} label="Activity history"/>{profile.role === "admin" && <Nav icon={<BookOpen/>} label="Academic setup"/>}</>}</nav><div className="user-card"><div className="avatar">{profile.fullName[0]}</div><div><strong>{profile.fullName}</strong><span>{roleLabel(profile.role)}</span></div><button title="Sign out" className="icon" onClick={onExit}><LogOut/></button></div></aside>

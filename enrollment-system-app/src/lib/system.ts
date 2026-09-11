@@ -162,9 +162,13 @@ export async function requestAccess(email: string, message: string) {
   } else localStorage.setItem(`access-request:${email}`, message);
 }
 
+const legacyStatuses: Record<string, Enrollment["status"]> = {
+  pending: "submitted", approved: "in_review", rejected: "returned", completed: "confirmed",
+};
+
 const fromRow = (row: any): Enrollment => ({
   id: row.id, userId: row.student?.user_id ?? row.student_id, studentNumber: row.student_number ?? row.student?.student_number ?? undefined, step: row.current_step,
-  status: ({ pending: "submitted", approved: "in_review", rejected: "returned", completed: "confirmed" }[row.status] ?? row.status), form: { ...emptyForm, ...(row.form_data ?? {}) }, documents: row.documents ?? {}, offices: { ...offices(), ...(row.office_statuses ?? {}) },
+  status: legacyStatuses[row.status] ?? row.status, form: { ...emptyForm, ...(row.form_data ?? {}) }, documents: row.documents ?? {}, offices: { ...offices(), ...(row.office_statuses ?? {}) },
   remarks: row.remarks ?? {}, payment: { status: "ready", ...(row.payment ?? {}) }, idStatus: row.id_status ?? "not_started",
   subjects: row.assigned_subjects ?? [], updatedAt: row.updated_at, events: row.events ?? [],
 });
@@ -221,6 +225,7 @@ export async function deactivateProgram(name: string) {
   if (error) throw error;
 }
 
-export const roleLabel = (role: Role) => ({ ict: "ICT-MIS", osas: "OSAS", scholarship: "Scholarship Assessment" }[role] ?? `${role[0].toUpperCase()}${role.slice(1)}`);
+const specialRoleLabels: Partial<Record<Role, string>> = { ict: "ICT-MIS", osas: "OSAS", scholarship: "Scholarship Assessment" };
+export const roleLabel = (role: Role) => specialRoleLabels[role] ?? `${role[0].toUpperCase()}${role.slice(1)}`;
 export const stateLabel = (value: string) => value.split("_").map(word => word[0].toUpperCase() + word.slice(1)).join(" ");
 export const addEvent = (item: Enrollment, text: string) => ({ ...item, events: [{ text, at: now() }, ...item.events] });
