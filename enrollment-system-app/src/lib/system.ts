@@ -12,6 +12,10 @@ export interface Profile {
   studentNumber?: string;
 }
 
+export type RegistrationResult =
+  | { status: "signed_in"; profile: Profile }
+  | { status: "confirmation_required"; email: string };
+
 export interface StudentForm {
   studentType: "freshman" | "transferee" | "continuing" | "returning";
   academicStatus: "regular" | "irregular";
@@ -115,6 +119,7 @@ export async function signIn(email: string, password: string): Promise<Profile> 
 }
 
 export async function profileForUser(user: User): Promise<Profile> {
+  if (supabase && user.user_metadata?.student_type === "freshman") await initializeFreshmanAccount();
   const { data, error } = await supabase!.from("profiles").select("id,email,full_name,role,student_number,is_active").eq("id", user.id).single();
   if (error) throw error;
   if (!data.is_active) throw new Error("This account is disabled.");
@@ -135,17 +140,26 @@ export async function signOut() {
   localStorage.removeItem("chmsu-demo-profile");
 }
 
-export async function registerFreshman(fullName: string, email: string, password: string): Promise<Profile> {
+async function initializeFreshmanAccount() {
+  if (!supabase) return;
+  const { error } = await supabase.rpc("initialize_freshman_account");
+  if (error) throw error;
+}
+
+export async function registerFreshman(firstName: string, lastName: string, email: string, password: string): Promise<RegistrationResult> {
+  const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
   if (supabase) {
-    const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { full_name: fullName, student_type: "freshman" } } });
+    const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { first_name: firstName.trim(), last_name: lastName.trim(), full_name: fullName, student_type: "freshman" } } });
     if (error) throw error;
-    if (!data.user || !data.session) throw new Error("Account created. Check your email to confirm it, then sign in.");
-    return profileForUser(data.user);
+    if (!data.user) throw new Error("We couldn't create your account. Please try again.");
+    if (!data.session) return { status: "confirmation_required", email };
+    await initializeFreshmanAccount();
+    return { status: "signed_in", profile: await profileForUser(data.user) };
   }
   const profile = { id: crypto.randomUUID(), email, fullName, role: "student" as const };
   localStorage.setItem("chmsu-demo-profile", JSON.stringify(profile));
   writeDemoEnrollment(createEnrollment(profile.id, fullName));
-  return profile;
+  return { status: "signed_in", profile };
 }
 
 export async function resetPassword(email: string) {
@@ -175,6 +189,7 @@ const fromRow = (row: any): Enrollment => ({
 
 export async function getEnrollments(profile: Profile): Promise<Enrollment[]> {
   if (!supabase) return readDemoEnrollments().filter(item => profile.role === "student" ? item.userId === profile.id : true);
+  if (profile.role === "student") await initializeFreshmanAccount();
   const query = supabase.from("enrollments").select("*,student:students!inner(user_id,student_number,full_name)").order("updated_at", { ascending: false });
   const { data, error } = profile.role === "student" ? await query.eq("student.user_id", profile.id) : await query;
   if (error) throw error;
