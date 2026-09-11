@@ -115,7 +115,7 @@ export async function signIn(email: string, password: string): Promise<Profile> 
 }
 
 export async function profileForUser(user: User): Promise<Profile> {
-  const { data, error } = await supabase!.from("es_profiles").select("id,email,full_name,role,student_number,is_active").eq("id", user.id).single();
+  const { data, error } = await supabase!.from("profiles").select("id,email,full_name,role,student_number,is_active").eq("id", user.id).single();
   if (error) throw error;
   if (!data.is_active) throw new Error("This account is disabled.");
   return { id: data.id, email: data.email, fullName: data.full_name, role: data.role, studentNumber: data.student_number ?? undefined };
@@ -157,22 +157,22 @@ export async function resetPassword(email: string) {
 
 export async function requestAccess(email: string, message: string) {
   if (supabase) {
-    const { error } = await supabase.from("es_account_access_requests").insert({ email, message });
+    const { error } = await supabase.from("account_access_requests").insert({ email, message });
     if (error) throw error;
   } else localStorage.setItem(`access-request:${email}`, message);
 }
 
 const fromRow = (row: any): Enrollment => ({
-  id: row.id, userId: row.student_id, studentNumber: row.student_number ?? undefined, step: row.current_step,
-  status: row.status, form: row.form_data, documents: row.documents ?? {}, offices: row.office_statuses ?? offices(),
-  remarks: row.remarks ?? {}, payment: row.payment ?? { status: "ready" }, idStatus: row.id_status ?? "not_started",
+  id: row.id, userId: row.student?.user_id ?? row.student_id, studentNumber: row.student_number ?? row.student?.student_number ?? undefined, step: row.current_step,
+  status: ({ pending: "submitted", approved: "in_review", rejected: "returned", completed: "confirmed" }[row.status] ?? row.status), form: { ...emptyForm, ...(row.form_data ?? {}) }, documents: row.documents ?? {}, offices: { ...offices(), ...(row.office_statuses ?? {}) },
+  remarks: row.remarks ?? {}, payment: { status: "ready", ...(row.payment ?? {}) }, idStatus: row.id_status ?? "not_started",
   subjects: row.assigned_subjects ?? [], updatedAt: row.updated_at, events: row.events ?? [],
 });
 
 export async function getEnrollments(profile: Profile): Promise<Enrollment[]> {
   if (!supabase) return readDemoEnrollments().filter(item => profile.role === "student" ? item.userId === profile.id : true);
-  const query = supabase.from("es_enrollments").select("*").order("updated_at", { ascending: false });
-  const { data, error } = profile.role === "student" ? await query.eq("student_id", profile.id) : await query;
+  const query = supabase.from("enrollments").select("*,student:students!inner(user_id,student_number,full_name)").order("updated_at", { ascending: false });
+  const { data, error } = profile.role === "student" ? await query.eq("student.user_id", profile.id) : await query;
   if (error) throw error;
   return (data ?? []).map(fromRow);
 }
@@ -180,14 +180,14 @@ export async function getEnrollments(profile: Profile): Promise<Enrollment[]> {
 export async function saveEnrollment(value: Enrollment, action = "save") {
   if (!supabase) return writeDemoEnrollment(value);
   const payload = {
-    id: value.id, student_id: value.userId, student_number: value.studentNumber ?? null, current_step: value.step,
+    student_number: value.studentNumber ?? null, current_step: value.step,
     status: value.status, form_data: value.form, documents: value.documents, office_statuses: value.offices,
     remarks: value.remarks, payment: value.payment, id_status: value.idStatus, assigned_subjects: value.subjects,
     events: value.events,
   };
   const { error } = action === "save"
-    ? await supabase.from("es_enrollments").upsert(payload)
-    : await supabase.rpc("es_transition_enrollment", { p_enrollment_id: value.id, p_action: action, p_payload: payload });
+    ? await supabase.from("enrollments").update(payload).eq("id", value.id)
+    : await supabase.rpc("transition_enrollment", { p_enrollment_id: value.id, p_action: action, p_payload: payload });
   if (error) throw error;
 }
 
@@ -202,21 +202,22 @@ export async function uploadDocument(enrollmentId: string, office: string, file:
 
 export async function getPrograms(): Promise<string[]> {
   if (!supabase) return JSON.parse(localStorage.getItem("chmsu-programs") || "[\"BS Computer Science\",\"BS Information Technology\",\"BS Business Administration\"]") as string[];
-  const { data, error } = await supabase.from("es_programs").select("name").eq("is_active", true).order("name");
+  const { data, error } = await supabase.from("programs").select("name").eq("is_active", true).order("name");
   if (error) throw error;
   return (data ?? []).map(row => row.name);
 }
 
 export async function addProgram(name: string) {
   if (!supabase) return;
-  const code = name.toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 20);
-  const { error } = await supabase.from("es_programs").insert({ code, name, college: "Unassigned", campus: [] });
+  const { data: campus } = await supabase.from("campus").select("id").limit(1).single();
+  if (!campus) throw new Error("Create at least one campus before adding a program.");
+  const { error } = await supabase.from("programs").insert({ name, college: "Unassigned", campus_id: campus.id });
   if (error) throw error;
 }
 
 export async function deactivateProgram(name: string) {
   if (!supabase) return;
-  const { error } = await supabase.from("es_programs").update({ is_active: false }).eq("name", name);
+  const { error } = await supabase.from("programs").update({ is_active: false }).eq("name", name);
   if (error) throw error;
 }
 

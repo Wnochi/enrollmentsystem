@@ -1,0 +1,13 @@
+{
+  "name": "enrollmentsystem",
+  "private": true,
+  "workspaces": [
+    "enrollment-system-app"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=enrollment-system-app",
+    "build": "npm run build --workspace=enrollment-system-app",
+    "preview": "npm run preview --workspace=enrollment-system-app",
+    "format": "npm run format --workspace=enrollment-system-app"
+  }
+}

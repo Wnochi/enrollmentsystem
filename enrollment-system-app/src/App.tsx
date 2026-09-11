@@ -28,7 +28,7 @@ export default function App() {
 
 function Auth({ onAuthenticated }: { onAuthenticated: (profile: Profile) => void }) {
   const [mode, setMode] = useState<"signin" | "freshman" | "access">("signin");
-  const [form, setForm] = useState({ name: "", email: "student@demo.chmsu.edu.ph", password: "Student123!", message: "" });
+  const [form, setForm] = useState({ name: "", email: isSupabaseConfigured ? "" : "student@demo.chmsu.edu.ph", password: isSupabaseConfigured ? "" : "Student123!", message: "" });
   const [busy, setBusy] = useState(false); const [notice, setNotice] = useState(""); const [error, setError] = useState("");
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError(""); setNotice("");
@@ -55,7 +55,7 @@ function Portal({ profile, onExit }: { profile: Profile; onExit: () => void }) {
   useEffect(() => { void reload(); }, [profile.id]);
   useEffect(() => {
     if (!supabase) return;
-    const channel = supabase.channel(`enrollments:${profile.id}`).on("postgres_changes", { event: "*", schema: "public", table: "es_enrollments" }, () => { void reload(); }).subscribe();
+    const channel = supabase.channel(`enrollments:${profile.id}`).on("postgres_changes", { event: "*", schema: "public", table: "enrollments" }, () => { void reload(); }).subscribe();
     return () => { void supabase.removeChannel(channel); };
   }, [profile.id]);
   const persist = async (item: Enrollment, action = "save") => { await saveEnrollment(item, action); await reload(); };
