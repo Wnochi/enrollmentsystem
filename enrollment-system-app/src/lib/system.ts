@@ -6,6 +6,16 @@ export type Office = "registrar" | "osas" | "guidance" | "medical" | "scholarshi
 
 export type ReviewState = "not_started" | "submitted" | "under_review" | "returned" | "cleared"
 
+export type FheStatus = "pending" | "eligible" | "ineligible"
+export type AssistanceStatus = "none" | "pending" | "approved" | "rejected"
+
+export interface ScholarshipDetails {
+  fheStatus: FheStatus
+  additionalAwards: string[]
+  assistanceStatus: AssistanceStatus
+  notes: string
+}
+
 export type StudentType = "freshman" | "transferee" | "continuing" | "returning"
 
 export interface CampusReference {
@@ -158,6 +168,8 @@ export interface Enrollment {
 
   remarks: Record<string, string>
 
+  scholarship: ScholarshipDetails
+
   payment: {
     status: "ready" | "submitted" | "verifying" | "confirmed" | "rejected"
     proof?: string
@@ -210,7 +222,20 @@ const offices = (): Record<Office, ReviewState> => ({
   ict: "not_started",
 })
 
+const scholarshipDetails = (): ScholarshipDetails => ({
+  fheStatus: "pending",
+  additionalAwards: [],
+  assistanceStatus: "none",
+  notes: "",
+})
+
 const now = () => new Date().toISOString()
+const requireBackendCapability = (reason: unknown, capability: string) => {
+  const error = reason as { code?: string; message?: string }
+  if (["42703", "42883", "42P01", "PGRST202", "PGRST204"].includes(String(error?.code ?? "").toUpperCase()))
+    throw new Error(`The backend is missing ${capability}. An administrator must apply the current Supabase migrations; retrying will not install it.`)
+  throw reason
+}
 
 const emptyAcademic = (): AcademicSelection => ({
   campusId: null,
@@ -231,6 +256,7 @@ const createEnrollment = (userId: string, name = ""): Enrollment => ({
 
   offices: offices(),
   remarks: {},
+  scholarship: scholarshipDetails(),
   payment: { status: "ready" },
   idStatus: "not_started",
   subjects: [],
@@ -303,6 +329,7 @@ export function readDemoEnrollments(): Enrollment[] {
           documents: item.documents ?? {},
           offices: { ...offices(), ...(item.offices ?? {}) },
           remarks: item.remarks ?? {},
+          scholarship: { ...scholarshipDetails(), ...(item.scholarship ?? {}) },
           subjects: item.subjects ?? [],
           events: item.events ?? [],
         }) as Enrollment,
@@ -544,12 +571,13 @@ const fromRow = (row: any): Enrollment => ({
     yearLevel: yearNumber(row.year_level ?? row.form_data?.yearLevel),
   },
 
-  academicIssue: row.academic_review?.[0]?.details?.message,
+  academicIssue: row.academic_review?.map((review: any) => review.details?.message).filter(Boolean).join(" · ") || undefined,
 
   documents: row.documents ?? {},
   offices: { ...offices(), ...(row.office_statuses ?? {}) },
 
   remarks: row.remarks ?? {},
+  scholarship: { ...scholarshipDetails(), ...(row.scholarship ?? {}) },
   payment: { status: "ready", ...(row.payment ?? {}) },
   idStatus: row.id_status ?? "not_started",
 
@@ -569,7 +597,7 @@ export async function getEnrollments(profile: Profile): Promise<Enrollment[]> {
   const query = supabase
     .from("enrollments")
     .select(
-      "*,student:students!inner(user_id,student_number,full_name),program:programs!left(id,name,college,campus_id,campus:campus!left(id,name)),term:academic_terms!left(id,academic_year,semester,status)",
+      "id,student_id,student_number,campus_id,term_id,program_id,student_type,year_level,status,current_step,form_data,office_statuses,remarks,scholarship,payment,id_status,assigned_subjects,updated_at,events,student:students!inner(user_id,student_number,full_name),program:programs!left(id,name,college,campus_id,campus:campus!left(id,name)),term:academic_terms!left(id,academic_year,semester,status)",
     )
     .order("updated_at", { ascending: false })
 
@@ -578,20 +606,40 @@ export async function getEnrollments(profile: Profile): Promise<Enrollment[]> {
       ? await query.eq("student.user_id", profile.id)
       : await query
 
-  if (error) throw error
+  if (error) requireBackendCapability(error, "the enrollment consistency schema")
 
-  return (data ?? []).map(fromRow)
+  const rows = data ?? []
+  if (!rows.length) return []
+
+  const [{ data: manifests, error: manifestError }, { data: reviews, error: reviewError }] = await Promise.all([
+    supabase.rpc("get_staff_document_manifests", { p_enrollment_ids: rows.map((row) => row.id) }),
+    supabase.from("enrollment_academic_reviews").select("enrollment_id,issue_key,details").eq("status", "open").in("enrollment_id", rows.map((row) => row.id)),
+  ])
+  if (manifestError) requireBackendCapability(manifestError, "the protected document manifest")
+  if (reviewError) requireBackendCapability(reviewError, "academic review records")
+
+  const documentsByEnrollment = new Map((manifests ?? []).map((manifest) => [manifest.enrollment_id, manifest.documents]))
+  const reviewsByEnrollment = new Map<string, string[]>()
+  for (const review of reviews ?? []) {
+    const issues = reviewsByEnrollment.get(review.enrollment_id) ?? []
+    issues.push(review.details?.message ?? review.issue_key)
+    reviewsByEnrollment.set(review.enrollment_id, issues)
+  }
+  const hydratedRows = rows.map((row) => ({
+    ...row,
+    documents: documentsByEnrollment.get(row.id) ?? {},
+    academic_review: (reviewsByEnrollment.get(row.id) ?? []).map((message) => ({ details: { message } })),
+  }))
+
+  return hydratedRows.map(fromRow)
 }
 
-export async function saveEnrollment(value: Enrollment, action = "save") {
+export async function saveEnrollment(
+  value: Enrollment,
+  action = "save",
+  actorRole?: Role,
+) {
   if (!supabase) return writeDemoEnrollment(value)
-
-  if (
-    value.academic.programId &&
-    value.academic.campusId &&
-    value.academic.termId
-  )
-    await saveAcademicSelection(value)
 
   const payload: Record<string, unknown> = {
     student_number: value.studentNumber ?? null,
@@ -607,21 +655,25 @@ export async function saveEnrollment(value: Enrollment, action = "save") {
     id_status: value.idStatus,
 
     events: value.events,
+    academic: {
+      campus_id: value.academic.campusId,
+      program_id: value.academic.programId,
+      term_id: value.academic.termId,
+      student_type: value.academic.studentType,
+      year_level: value.academic.yearLevel,
+    },
   }
+
+  if (actorRole !== "student") payload.scholarship = value.scholarship
 
   if (action === "approve")
     Object.assign(payload, { assigned_subjects: value.subjects })
 
-  const { error } =
-    action === "save"
-      ? await supabase.from("enrollments").update(payload).eq("id", value.id)
-      : await supabase.rpc("transition_enrollment", {
-          p_enrollment_id: value.id,
-          p_action: action,
-          p_payload: payload,
-        })
+  const result = actorRole === "scholarship" && action !== "save"
+      ? await supabase.rpc("transition_scholarship_enrollment", { p_enrollment_id: value.id, p_action: action, p_payload: payload })
+      : await supabase.rpc("transition_enrollment", { p_enrollment_id: value.id, p_action: action, p_payload: payload })
 
-  if (error) throw error
+  if (result.error) requireBackendCapability(result.error, action === "save" || action === "submit" ? "transactional enrollment saving" : `${actorRole ?? "staff"} enrollment transitions`)
 }
 
 export async function uploadDocument(
@@ -909,6 +961,14 @@ export async function assignSubjectSections(
   if (error) throw error
 
   return (data ?? []) as AssignedSubject[]
+}
+
+export async function clearSubjectSections(enrollmentId: string) {
+  if (!supabase) return
+  const { error } = await supabase.rpc("clear_enrollment_subject_sections", {
+    p_enrollment_id: enrollmentId,
+  })
+  if (error) requireBackendCapability(error, "Registrar-controlled assignment clearing")
 }
 
 const specialRoleLabels: Partial<Record<Role, string>> = {

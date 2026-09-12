@@ -53,10 +53,10 @@ union all select gen_random_uuid(), other_user_id, 'Authz Other', '{}' from enro
 union all select gen_random_uuid(), third_user_id, 'Authz Third', '{}' from enrollment_authorization_fixtures;
 
 insert into public.enrollments(
-  student_id, term_id, program_id, student_type, year_level, status, current_step,
+  student_id, term_id, program_id, campus_id, student_type, year_level, status, current_step,
   form_data, documents, office_statuses, remarks, payment, id_status, assigned_subjects, events
 )
-select s.id, t.id, p.id, 'continuing', 1, 'draft', 1,
+select s.id, t.id, p.id, p.campus_id, 'continuing', 1, 'draft', 1,
   '{"fullName":"Authz Student"}', '{}',
   '{"registrar":"not_started","osas":"not_started","guidance":"not_started","medical":"not_started","scholarship":"not_started","cashier":"not_started","ict":"not_started"}',
   '{}', '{"status":"ready"}', 'not_started', '[]', '[]'
@@ -70,10 +70,10 @@ update enrollment_authorization_fixtures
 set draft_enrollment_id = (select e.id from public.enrollments e join public.students s on s.id = e.student_id join enrollment_authorization_fixtures f on f.student_user_id = s.user_id);
 
 insert into public.enrollments(
-  student_id, term_id, program_id, student_type, year_level, status, current_step,
+  student_id, term_id, program_id, campus_id, student_type, year_level, status, current_step,
   form_data, documents, office_statuses, remarks, payment, id_status, assigned_subjects, events
 )
-select s.id, t.id, p.id, 'continuing', 1, 'submitted', 2,
+select s.id, t.id, p.id, p.campus_id, 'continuing', 1, 'submitted', 2,
   '{"fullName":"Authz Other"}', '{}',
   '{"registrar":"not_started","osas":"not_started","guidance":"not_started","medical":"not_started","scholarship":"not_started","cashier":"not_started","ict":"not_started"}',
   '{}', '{"status":"ready"}', 'not_started', '[]', '[]'
@@ -87,10 +87,10 @@ update enrollment_authorization_fixtures
 set incomplete_enrollment_id = (select e.id from public.enrollments e join public.students s on s.id = e.student_id join enrollment_authorization_fixtures f on f.other_user_id = s.user_id);
 
 insert into public.enrollments(
-  student_id, term_id, program_id, student_type, year_level, status, current_step,
+  student_id, term_id, program_id, campus_id, student_type, year_level, status, current_step,
   form_data, documents, office_statuses, remarks, payment, id_status, assigned_subjects, events
 )
-select s.id, t.id, p.id, 'continuing', 1, 'in_review', 6,
+select s.id, t.id, p.id, p.campus_id, 'continuing', 1, 'in_review', 6,
   '{"fullName":"Authz Third"}', '{}',
   '{"registrar":"cleared","osas":"cleared","guidance":"cleared","medical":"cleared","scholarship":"cleared","cashier":"cleared","ict":"cleared"}',
   '{}', '{"status":"confirmed","receipt":"INS-AUTHZ"}', 'ready',
@@ -103,6 +103,16 @@ returning id;
 
 update enrollment_authorization_fixtures
 set complete_enrollment_id = (select e.id from public.enrollments e join public.students s on s.id = e.student_id join enrollment_authorization_fixtures f on f.third_user_id = s.user_id);
+
+insert into public.sections(term_id,subject_id,program_id,section_code,schedule,room,capacity)
+select e.term_id,sub.id,e.program_id,'AUTHZ-SECTION','Monday 08:00-09:00','TEST',10
+from public.enrollments e cross join lateral(select id from public.subjects limit 1) sub
+where e.id=(select complete_enrollment_id from enrollment_authorization_fixtures)
+on conflict(term_id,subject_id,section_code) do nothing;
+insert into public.enrollment_section_assignments(enrollment_id,section_id,assigned_by)
+select f.complete_enrollment_id,s.id,f.registrar_user_id
+from enrollment_authorization_fixtures f join public.enrollments e on e.id=f.complete_enrollment_id
+join public.sections s on s.term_id=e.term_id and s.program_id=e.program_id and s.section_code='AUTHZ-SECTION';
 
 grant select on enrollment_authorization_fixtures to authenticated;
 

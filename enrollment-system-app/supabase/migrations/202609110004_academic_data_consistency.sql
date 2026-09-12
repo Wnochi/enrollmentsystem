@@ -33,10 +33,14 @@ create policy enrollment_academic_reviews_read on public.enrollment_academic_rev
 );
 
 -- A missing campus_id is unambiguous when the existing canonical program_id resolves to one campus.
+-- This migration runs without an authenticated actor, so suspend only the enrollment
+-- write guard around the canonical backfill and restore it before continuing.
+alter table public.enrollments disable trigger protect_enrollment_staff_fields;
 update public.enrollments e
 set campus_id=p.campus_id
 from public.programs p
 where e.program_id=p.id and e.campus_id is null and e.status<>'confirmed';
+alter table public.enrollments enable trigger protect_enrollment_staff_fields;
 
 insert into public.enrollment_academic_reviews(enrollment_id,issue_key,details)
 select e.id,

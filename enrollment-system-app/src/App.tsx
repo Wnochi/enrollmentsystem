@@ -33,6 +33,7 @@ import {
   addEvent,
   addProgram,
   assignSubjectSections,
+  clearSubjectSections,
   deactivateProgram,
   getAcademicReferenceData,
   getDocumentLink,
@@ -55,6 +56,7 @@ import {
   type Office,
   type Profile,
   type Role,
+  type ScholarshipDetails,
   type StudentForm,
   type SubjectSection,
 } from "./lib/system"
@@ -124,8 +126,13 @@ const documentFilename = (path: string) => path.includes("/") ? path.slice(path.
 const documentOffice = (name: string) => name.toLowerCase().includes("payment") ? "cashier" : name.toLowerCase().includes("medical") ? "medical" : "registrar"
 const staffStatuses = (office: Office) => office === "cashier" ? ["ready", "submitted", "verifying", "confirmed", "rejected"] : office === "ict" ? ["not_started", "scheduled", "captured", "processing", "ready", "completed"] : ["not_started", "submitted", "under_review", "returned", "cleared"]
 const staffStatusFor = (item: Enrollment, office: Office) => office === "cashier" ? item.payment.status : office === "ict" ? item.idStatus : item.offices[office]
-const officeForRole = (role: Role): Office => role === "admin" ? "registrar" : role
 const errorMessage = (reason: unknown, fallback: string) => reason instanceof Error ? reason.message : typeof reason === "object" && reason !== null && "message" in reason ? String(reason.message) : fallback
+const isMissingBackendCapability = (message: string) => message.includes("An administrator must apply the current Supabase migrations")
+const officeLabel = (office: Office) => roleLabel(office)
+const countStatus = (items: Enrollment[], office: Office, status: string) => items.filter((item) => staffStatusFor(item, office) === status).length
+const officeComplete = (item: Enrollment, office: Office) => office === "cashier" ? item.payment.status === "confirmed" : office === "ict" ? ["ready", "completed"].includes(item.idStatus) : item.offices[office] === "cleared"
+const officeItems = (items: Enrollment[], office: Office) => items.filter((item) => !officeComplete(item, office))
+const countScholarship = (items: Enrollment[], predicate: (value: ScholarshipDetails) => boolean) => items.filter((item) => predicate(item.scholarship)).length
 const routeTitle = (route: PortalRoute) => ({ overview: "Enrollment overview", enroll: "Enrollment form", documents: "Documents", updates: "Activity", queue: "Enrollment queue", activity: "Activity history", academic: "Academic setup" })[route]
 
 export default function App() {
@@ -577,14 +584,14 @@ function Portal({ profile, onExit }: { profile: Profile; onExit: () => void }) {
     return () => { void client.removeChannel(channel) }
   }, [profile.id])
 
-  const persist = async (item: Enrollment, action = "save") => { await saveEnrollment(item, action); await reload(true); setDirty(false) }
+  const persist = async (item: Enrollment, action = "save") => { await saveEnrollment(item, action, profile.role); await reload(true); setDirty(false) }
   const navigate = (next: PortalRoute) => { if (location.hash !== `#${next}`) location.hash = next; setMobile(false) }
   const navItems = profile.role === "student" ? [
     ["overview", <LayoutDashboard />, "Enrollment overview"], ["enroll", <ClipboardList />, "Enrollment form"], ["documents", <FileText />, "Documents"], ["updates", <Bell />, "Activity"],
   ] as const : profile.role === "admin" ? [
-    ["queue", <Users />, "Enrollment queue"], ["activity", <ClipboardList />, "Activity history"], ["academic", <BookOpen />, "Academic setup"],
+    ["queue", <Users />, "Dashboard"], ["activity", <ClipboardList />, "Activity history"], ["academic", <BookOpen />, "Academic setup"],
   ] as const : [
-    ["queue", <Users />, "Enrollment queue"], ["activity", <ClipboardList />, "Activity history"],
+    ["queue", <Users />, "Dashboard"], ["activity", <ClipboardList />, "Activity history"],
   ] as const
   const selectedTerm = references?.terms.find((term) => term.id === items[0]?.academic.termId)
   const termLabel = selectedTerm ? `${selectedTerm.academicYear} · ${selectedTerm.semester}` : ""
@@ -624,7 +631,7 @@ function Portal({ profile, onExit }: { profile: Profile; onExit: () => void }) {
           </button>
           <div>
             <p className="eyebrow">CHMSU ONLINE SERVICES</p>
-            <strong>{routeTitle(route)}</strong>
+            <strong>{route === "queue" && profile.role !== "student" ? `${roleLabel(profile.role)} dashboard` : routeTitle(route)}</strong>
           </div>
           {termLabel && <span className="term-context">{termLabel}</span>}
         </header>
@@ -635,11 +642,11 @@ function Portal({ profile, onExit }: { profile: Profile; onExit: () => void }) {
               <p>Loading records…</p>
             </Centered>
           ) : loadError ? (
-            <section className="card state-card"><Alert tone="error">{loadError}</Alert><button className="secondary" onClick={() => void reload(true)}>Retry</button></section>
+            <section className="card state-card"><Alert tone="error">{loadError}</Alert>{!isMissingBackendCapability(loadError) && <button className="secondary" onClick={() => void reload(true)}>Retry</button>}</section>
           ) : profile.role === "student" ? (
             <StudentPortal item={items[0]} persist={persist} route={route} onNavigate={navigate} onDirtyChange={setDirty} updateAvailable={updateAvailable} onRefresh={() => { setDirty(false); void reload(true) }} />
           ) : profile.role === "admin" ? (
-            route === "academic" ? <AdminPortal items={items} /> : route === "activity" ? <ActivityHistory items={items} /> : <StaffPortal profile={profile} items={items} persist={persist} />
+            route === "academic" ? <AdminPortal items={items} /> : route === "activity" ? <ActivityHistory items={items} /> : <AdminDashboard items={items} />
           ) : (
             route === "activity" ? <ActivityHistory items={items} /> : <StaffPortal profile={profile} items={items} persist={persist} />
           )}
@@ -703,6 +710,7 @@ function StudentPortal({
     action = "save",
     message = "Draft saved.",
   ) => {
+    lastSave.current = null
     setWorking(next)
     setSaveState({ status: "pending", message: action === "save" ? "Saving…" : "Submitting…" })
     try {
@@ -712,9 +720,9 @@ function StudentPortal({
       setNotice(message)
       setSaveState({ status: "success", message })
     } catch (reason) {
-      const error = reason instanceof Error ? reason.message : "The change could not be saved."
+      const error = errorMessage(reason, "The change could not be saved.")
       setSaveState({ status: "error", message: error })
-      lastSave.current = () => save(next, action, message)
+      if (!isMissingBackendCapability(error)) lastSave.current = () => save(next, action, message)
       throw reason
     }
   }
@@ -746,10 +754,7 @@ function StudentPortal({
         </Alert>
       )}
       {working.academicIssue && (
-        <Alert tone="error">
-          This record has an academic-data mismatch that needs Registrar review.
-          Historical values were not changed.
-        </Alert>
+        <Alert tone="error">Academic review required: {working.academicIssue}</Alert>
       )}
       {referenceError && (
         <Alert tone="error">
@@ -878,11 +883,11 @@ function EnrollmentWizard({
       {
         ...item,
         step: Math.max(item.step, Math.min(6, activeStep + 1)),
-        status: item.status === "draft" ? "submitted" : item.status,
+        status: item.status,
       },
       steps[activeStep - 1] + " submitted",
     )
-    try { await save(updated, activeStep === 1 ? "submit" : "save", "Step submitted successfully."); setViewedStep(Math.min(6, activeStep + 1)) } catch { /* feedback is rendered by the parent */ }
+    try { await save(updated, "save", "Progress saved."); setViewedStep(Math.min(6, activeStep + 1)) } catch { /* feedback is rendered by the parent */ }
   }
 
   const upload = async (office: string, key: string, file?: File) => {
@@ -984,6 +989,11 @@ function EnrollmentWizard({
           {activeStep < 6 && (
             <button className="primary" disabled={busy || saving} onClick={() => void next()}>
               Save and continue <ChevronRight />
+            </button>
+          )}
+          {activeStep === 6 && item.status !== "submitted" && (
+            <button className="primary" disabled={busy || saving} onClick={() => void save(item, "submit", "Enrollment submitted successfully.").catch(() => {})}>
+              Submit enrollment
             </button>
           )}
         </div>
@@ -1338,6 +1348,9 @@ function StaffPortal({
 }) {
   const [query, setQuery] = useState("")
   const [status, setStatus] = useState("")
+  const [campusFilter, setCampusFilter] = useState("")
+  const [programFilter, setProgramFilter] = useState("")
+  const [studentTypeFilter, setStudentTypeFilter] = useState("")
   const [selected, setSelected] = useState<Enrollment | null>(null)
   const [remark, setRemark] = useState("")
   const [sections, setSections] = useState<SubjectSection[]>([])
@@ -1347,8 +1360,8 @@ function StaffPortal({
   const [decisionState, setDecisionState] = useState<ActionState>({ status: "idle" })
   const [lastDecision, setLastDecision] = useState<"approve" | "return" | "release" | null>(null)
   const drawerRef = useRef<HTMLElement>(null)
-  const office = officeForRole(profile.role)
-  const canReview = profile.role !== "admin"
+  const office = profile.role as Office
+  const visibleDocuments = (item: Enrollment) => Object.entries(item.documents).filter(([name]) => profile.role === "medical" ? documentOffice(name) === "medical" : documentOffice(name) !== "medical")
 
   useEffect(() => {
     if (!selected) return
@@ -1409,11 +1422,17 @@ function StaffPortal({
           `${item.form.fullName} ${item.form.program}`
             .toLowerCase()
             .includes(query.toLowerCase()) &&
+          (!campusFilter || item.form.campus === campusFilter) &&
+          (!programFilter || item.form.program === programFilter) &&
+          (!studentTypeFilter || item.form.studentType === studentTypeFilter) &&
           (!status ||
             staffStatusFor(item, office) === status),
       ),
-    [items, query, status, office],
+    [items, query, status, campusFilter, programFilter, studentTypeFilter, office],
   )
+
+  const campusOptions = [...new Set(items.map((item) => item.form.campus).filter(Boolean))]
+  const programOptions = [...new Set(items.map((item) => item.form.program).filter(Boolean))]
 
   const assign = async () => {
     if (!selected || profile.role !== "registrar") return
@@ -1445,8 +1464,23 @@ function StaffPortal({
     }
   }
 
+  const clearAssignments = async () => {
+    if (!selected || profile.role !== "registrar") return
+    setSectionBusy(true)
+    setSectionError("")
+    try {
+      await clearSubjectSections(selected.id)
+      setSectionIds([])
+      setSelected({ ...selected, subjects: [] })
+    } catch (reason) {
+      setSectionError(errorMessage(reason, "Subject assignments could not be cleared."))
+    } finally {
+      setSectionBusy(false)
+    }
+  }
+
   const act = async (decision: "approve" | "return") => {
-    if (!selected || !canReview) return
+    if (!selected) return
     if (decisionState.status === "pending") return
     if (
       profile.role === "registrar" &&
@@ -1530,14 +1564,15 @@ function StaffPortal({
       <div className="page-head">
         <div>
           <p className="eyebrow">ROLE-PROTECTED WORKSPACE</p>
-          <h1 data-page-heading tabIndex={-1}>Enrollment queue</h1>
-          <p>Review submitted records and leave a traceable decision.</p>
+          <h1 data-page-heading tabIndex={-1}>{officeLabel(office)} dashboard</h1>
+          <p>{staffDashboardDescription(office)}</p>
         </div>
         <div className="summary-pill">
           <strong>{filtered.length}</strong>
           <span>records</span>
         </div>
       </div>
+      <StaffDashboardByRole role={office} items={items} filteredCount={filtered.length} />
       <ActionFeedback state={decisionState} onRetry={lastDecision === "release" && selected ? release : (lastDecision === "approve" || lastDecision === "return") && selected ? () => void act(lastDecision) : undefined} />
       <div className="toolbar">
         <label>
@@ -1548,6 +1583,18 @@ function StaffPortal({
             onChange={(e) => setQuery(e.target.value)}
           />
         </label>
+        <select aria-label="Filter by campus" value={campusFilter} onChange={(e) => setCampusFilter(e.target.value)}>
+          <option value="">All campuses</option>
+          {campusOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+        </select>
+        <select aria-label="Filter by program" value={programFilter} onChange={(e) => setProgramFilter(e.target.value)}>
+          <option value="">All programs</option>
+          {programOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+        </select>
+        <select aria-label="Filter by student type" value={studentTypeFilter} onChange={(e) => setStudentTypeFilter(e.target.value)}>
+          <option value="">All student types</option>
+          {(["freshman", "transferee", "continuing", "returning"] as const).map((value) => <option key={value} value={value}>{stateLabel(value)}</option>)}
+        </select>
           <select value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="">All statuses</option>
             {staffStatuses(office).map((v) => (
@@ -1566,7 +1613,7 @@ function StaffPortal({
           <span>Updated</span>
         </div>
         {filtered.map((item) => (
-          <button
+                <button
             className="table-row"
             key={item.id}
             onClick={() => { setSelected(item); setRemark(""); setDecisionState({ status: "idle" }) }}
@@ -1604,10 +1651,7 @@ function StaffPortal({
               {selected.form.campus || "Campus not assigned"}
             </p>
             {selected.academicIssue && (
-              <Alert tone="error">
-                Academic data needs review. Do not correct a historical record
-                by guessing.
-              </Alert>
+              <Alert tone="error">Academic review required: {selected.academicIssue}</Alert>
             )}
             <div className="detail-grid">
               <Stat
@@ -1624,23 +1668,13 @@ function StaffPortal({
               />
               <Stat value={stateLabel(selected.status)} label="Enrollment" />
             </div>
-            {profile.role === "medical" ? (
-              <Alert tone="info">
-                Only Medical Services and the student can access medical
-                documents.
-              </Alert>
-            ) : (
-              <div className="document-summary">
-                <h3>Submitted documents</h3>
-                {Object.keys(selected.documents).map((name) => (
-                  <span key={name}>
-                    <FileText />
-                    {name}
-                  </span>
-                ))}
-              </div>
-            )}
-            {!canReview && <Alert tone="info">Administrators can review records here. Staff decisions are made by the assigned office.</Alert>}
+            {profile.role === "cashier" && <div className="record-rows"><RecordRow label="Insurance fee" value="₱125.00" /><RecordRow label="Receipt" value={selected.payment.receipt || "Not issued"} /></div>}
+            {profile.role === "ict" && <div className="record-rows"><RecordRow label="ID status" value={stateLabel(selected.idStatus)} /><RecordRow label="Student number" value={selected.studentNumber || "Pending assignment"} /></div>}
+            <div className="document-summary">
+              <h3>{profile.role === "medical" ? "Medical documents" : "Submitted documents"}</h3>
+              {visibleDocuments(selected).map(([name]) => <span key={name}><FileText />{name}</span>)}
+              {!visibleDocuments(selected).length && <small>{profile.role === "medical" ? "No medical documents submitted." : "Medical documents are restricted to Medical Services."}</small>}
+            </div>
             {profile.role === "registrar" && (
               <div className="subject-assignment">
                 <h3>Subject sections</h3>
@@ -1689,6 +1723,34 @@ function StaffPortal({
                     ? "Saving subject assignments…"
                     : "Save subject assignments"}
                 </button>
+                {!!selected.subjects.length && (
+                  <button className="danger full" disabled={sectionBusy || decisionState.status === "pending"} onClick={() => void clearAssignments()}>
+                    Clear assignments for academic correction
+                  </button>
+                )}
+              </div>
+            )}
+            {profile.role === "scholarship" && (
+              <div className="subject-assignment">
+                <h3>Scholarship assessment</h3>
+                <Field label="Free Higher Education status">
+                  <select value={selected.scholarship.fheStatus} onChange={(event) => setSelected({ ...selected, scholarship: { ...selected.scholarship, fheStatus: event.target.value as ScholarshipDetails["fheStatus"] } })}>
+                    <option value="pending">Pending assessment</option>
+                    <option value="eligible">Eligible</option>
+                    <option value="ineligible">Not eligible</option>
+                  </select>
+                </Field>
+                <Field label="Additional scholarship awards">
+                  <input value={selected.scholarship.additionalAwards.join(", ")} placeholder="Separate awards with commas" onChange={(event) => setSelected({ ...selected, scholarship: { ...selected.scholarship, additionalAwards: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) } })} />
+                </Field>
+                <Field label="Financial assistance">
+                  <select value={selected.scholarship.assistanceStatus} onChange={(event) => setSelected({ ...selected, scholarship: { ...selected.scholarship, assistanceStatus: event.target.value as ScholarshipDetails["assistanceStatus"] } })}>
+                    <option value="none">No additional assistance</option>
+                    <option value="pending">Pending</option>
+                    <option value="approved">Approved</option>
+                    <option value="rejected">Rejected</option>
+                  </select>
+                </Field>
               </div>
             )}
             <Field label="Staff remarks">
@@ -1702,12 +1764,12 @@ function StaffPortal({
             <div className="drawer-actions">
               <button
                 className="danger"
-                disabled={!canReview || !remark.trim() || decisionState.status === "pending"}
+                disabled={!remark.trim() || decisionState.status === "pending"}
                 onClick={() => void act("return")}
               >
                 Return for correction
               </button>
-              <button className="primary" disabled={!canReview || decisionState.status === "pending"} onClick={() => void act("approve")}>
+              <button className="primary" disabled={decisionState.status === "pending"} onClick={() => void act("approve")}>
                 Approve / clear
               </button>
             </div>
@@ -1723,6 +1785,129 @@ function StaffPortal({
       )}
     </>
   )
+}
+
+type StaffDashboardProps = { items: Enrollment[]; filteredCount: number }
+type StaffMetric = { label: string; value: string | number }
+
+const staffDashboardDescription = (office: Office) => ({
+  registrar: "Validate enrollment records, assign real subject sections, and release official enrollment forms.",
+  osas: "Review student eligibility and complete the Office for Student Affairs and Services clearance.",
+  guidance: "Review guidance requirements and record the student support clearance decision.",
+  medical: "Review restricted medical requirements and record the Medical Services clearance.",
+  scholarship: "Assess Free Higher Education eligibility, additional awards, and financial assistance.",
+  cashier: "Verify the ₱125.00 insurance payment and issue a receipt for each accepted payment.",
+  ict: "Process identity capture, student numbers, and school ID readiness.",
+}[office])
+
+function StaffDashboardByRole({ role, items, filteredCount }: StaffDashboardProps & { role: Office }) {
+  switch (role) {
+    case "registrar": return <RegistrarDashboard items={items} filteredCount={filteredCount} />
+    case "osas": return <OsasDashboard items={items} filteredCount={filteredCount} />
+    case "guidance": return <GuidanceDashboard items={items} filteredCount={filteredCount} />
+    case "medical": return <MedicalDashboard items={items} filteredCount={filteredCount} />
+    case "scholarship": return <ScholarshipDashboard items={items} filteredCount={filteredCount} />
+    case "cashier": return <CashierDashboard items={items} filteredCount={filteredCount} />
+    case "ict": return <IctDashboard items={items} filteredCount={filteredCount} />
+  }
+}
+
+function StaffRoleSummary({ title, description, metrics, children }: { title: string; description: string; metrics: StaffMetric[]; children?: ReactNode }) {
+  return (
+    <>
+      <div className="staff-summary-grid">
+        {metrics.map((metric) => <div className="card" key={metric.label}><strong>{metric.value}</strong><span>{metric.label}</span></div>)}
+      </div>
+      <section className="card staff-role-panel">
+        <h2>{title}</h2>
+        <p>{description}</p>
+        {children}
+      </section>
+    </>
+  )
+}
+
+function RegistrarDashboard({ items, filteredCount }: StaffDashboardProps) {
+  return <StaffRoleSummary title="Registrar processing" description="The Registrar owns requirements validation, academic checks, section assignments, and final release." metrics={[
+    { label: "Visible queue", value: filteredCount },
+    { label: "Needs review", value: officeItems(items, "registrar").length },
+    { label: "Academic issues", value: items.filter((item) => item.academicIssue).length },
+    { label: "Ready to release", value: items.filter((item) => item.status === "in_review" && item.payment.status === "confirmed" && item.subjects.length > 0).length },
+  ]}><div className="record-rows"><RecordRow label="Primary action" value="Validate and release enrollment" /><RecordRow label="Section assignment" value="Required before approval" /></div></StaffRoleSummary>
+}
+
+function OsasDashboard({ items, filteredCount }: StaffDashboardProps) {
+  return <StaffRoleSummary title="OSAS eligibility review" description="OSAS sees student information and non-medical enrollment documents needed for eligibility review." metrics={[
+    { label: "Visible queue", value: filteredCount },
+    { label: "Pending OSAS", value: countStatus(items, "osas", "submitted") + countStatus(items, "osas", "under_review") },
+    { label: "Cleared", value: countStatus(items, "osas", "cleared") },
+    { label: "Returned", value: countStatus(items, "osas", "returned") },
+  ]}><div className="record-rows"><RecordRow label="Primary action" value="Approve or return eligibility review" /><RecordRow label="Medical records" value="Clearance status only" /></div></StaffRoleSummary>
+}
+
+function GuidanceDashboard({ items, filteredCount }: StaffDashboardProps) {
+  return <StaffRoleSummary title="Guidance clearance" description="Guidance staff review guidance requirements, add remarks, and complete the support clearance." metrics={[
+    { label: "Visible queue", value: filteredCount },
+    { label: "Pending guidance", value: countStatus(items, "guidance", "submitted") + countStatus(items, "guidance", "under_review") },
+    { label: "Cleared", value: countStatus(items, "guidance", "cleared") },
+    { label: "Returned", value: countStatus(items, "guidance", "returned") },
+  ]}><div className="record-rows"><RecordRow label="Primary action" value="Record guidance clearance" /><RecordRow label="Staff remarks" value="Visible in student activity history" /></div></StaffRoleSummary>
+}
+
+function MedicalDashboard({ items, filteredCount }: StaffDashboardProps) {
+  const medicalDocuments = items.reduce((count, item) => count + Object.keys(item.documents).filter((name) => documentOffice(name) === "medical").length, 0)
+  return <StaffRoleSummary title="Medical Services clearance" description="Medical documents are private to Medical Services and the student. Other offices see only the clearance status." metrics={[
+    { label: "Visible queue", value: filteredCount },
+    { label: "Pending medical", value: countStatus(items, "medical", "submitted") + countStatus(items, "medical", "under_review") },
+    { label: "Medical files", value: medicalDocuments },
+    { label: "Cleared", value: countStatus(items, "medical", "cleared") },
+  ]}><div className="record-rows"><RecordRow label="Primary action" value="Approve or return medical clearance" /><RecordRow label="Privacy boundary" value="Medical files are restricted" /></div></StaffRoleSummary>
+}
+
+function ScholarshipDashboard({ items, filteredCount }: StaffDashboardProps) {
+  const awards = items.reduce((count, item) => count + item.scholarship.additionalAwards.length, 0)
+  return <StaffRoleSummary title="Scholarship and FHE assessment" description="Free Higher Education coverage is tracked separately from additional scholarships and financial assistance." metrics={[
+    { label: "Visible queue", value: filteredCount },
+    { label: "FHE eligible", value: countScholarship(items, (value) => value.fheStatus === "eligible") },
+    { label: "Pending assessment", value: countScholarship(items, (value) => value.fheStatus === "pending") },
+    { label: "Additional awards", value: awards },
+  ]}><div className="record-rows"><RecordRow label="Financial assistance pending" value={countScholarship(items, (value) => value.assistanceStatus === "pending")} /><RecordRow label="Primary action" value="Save assessment and clear scholarship review" /></div></StaffRoleSummary>
+}
+
+function CashierDashboard({ items, filteredCount }: StaffDashboardProps) {
+  return <StaffRoleSummary title="Insurance payment verification" description="Cashier processing is centered on the mandatory ₱125.00 student insurance payment and receipt verification." metrics={[
+    { label: "Visible queue", value: filteredCount },
+    { label: "Payment submitted", value: countStatus(items, "cashier", "submitted") + countStatus(items, "cashier", "verifying") },
+    { label: "Confirmed", value: countStatus(items, "cashier", "confirmed") },
+    { label: "Rejected", value: countStatus(items, "cashier", "rejected") },
+  ]}><div className="record-rows"><RecordRow label="Required payment" value="₱125.00 insurance" /><RecordRow label="Primary action" value="Verify proof and issue receipt" /></div></StaffRoleSummary>
+}
+
+function IctDashboard({ items, filteredCount }: StaffDashboardProps) {
+  return <StaffRoleSummary title="ICT-MIS ID processing" description="ICT-MIS manages identity capture, student-number assignment, and school ID readiness." metrics={[
+    { label: "Visible queue", value: filteredCount },
+    { label: "Not started", value: countStatus(items, "ict", "not_started") },
+    { label: "Processing", value: countStatus(items, "ict", "processing") + countStatus(items, "ict", "captured") },
+    { label: "Ready or complete", value: countStatus(items, "ict", "ready") + countStatus(items, "ict", "completed") },
+  ]}><div className="record-rows"><RecordRow label="Primary action" value="Update ID processing status" /><RecordRow label="Output" value="Student number and school ID readiness" /></div></StaffRoleSummary>
+}
+
+function AdminDashboard({ items }: { items: Enrollment[] }) {
+  const officeNames: Office[] = ["registrar", "osas", "guidance", "medical", "scholarship", "cashier", "ict"]
+  return <>
+    <div className="page-head">
+      <div><p className="eyebrow">SYSTEM OVERVIEW</p><h1 data-page-heading tabIndex={-1}>Admin dashboard</h1><p>Monitor enrollment progress across offices without making office decisions.</p></div>
+      <div className="summary-pill"><strong>{items.length}</strong><span>enrollment records</span></div>
+    </div>
+    <div className="staff-summary-grid">
+      <div className="card"><strong>{items.filter((item) => item.status === "submitted" || item.status === "in_review").length}</strong><span>Active reviews</span></div>
+      <div className="card"><strong>{items.filter((item) => item.status === "returned").length}</strong><span>Returned records</span></div>
+      <div className="card"><strong>{items.filter((item) => item.status === "confirmed").length}</strong><span>Confirmed enrollments</span></div>
+      <div className="card"><strong>{items.filter((item) => item.academicIssue).length}</strong><span>Academic issues</span></div>
+    </div>
+    <section className="card staff-role-panel"><h2>Office progress</h2><p>Cross-office clearance counts for the current enrollment records.</p><div className="record-rows">{officeNames.map((office) => <RecordRow key={office} label={officeLabel(office)} value={`${items.filter((item) => officeComplete(item, office)).length} cleared · ${officeItems(items, office).length} open`} />)}</div></section>
+    <section className="table-card"><div className="table-head"><span>Student</span><span>Program</span><span>Campus</span><span>Status</span><span>Updated</span></div>{items.map((item) => <div className="table-row" key={item.id}><span><strong>{item.form.fullName || "Unnamed student"}</strong><small>{item.studentNumber || "Not yet assigned"}</small></span><span>{item.form.program || "Academic setup incomplete"}</span><span>{item.form.campus || "Not assigned"}</span><Status value={item.status} /><span>{new Date(item.updatedAt).toLocaleDateString()}</span></div>)}{!items.length && <Empty title="No enrollments" text="No enrollment records are available." />}</section>
+  </>
 }
 
 function AdminPortal({ items }: { items: Enrollment[] }) {
