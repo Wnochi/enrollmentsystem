@@ -69,6 +69,12 @@ admin@demo.chmsu.edu.ph
 
 Never expose a Supabase service-role key in this browser application. The frontend reads `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`; variables with other prefixes are ignored.
 
+## Audit account login readiness
+
+Run `enrollment-system-app/supabase/audits/202609120001_authentication_audit.sql` in the Supabase SQL editor using a trusted administrative role. It is read-only and joins `auth.users`, `public.profiles`, and `public.students` to classify every account as able to log on, blocked from the portal, awaiting confirmation, or awaiting freshman provisioning.
+
+The browser publishable key cannot read the complete account roster, so this audit must not be run through the frontend.
+
 ## Project structure
 
 ```text
@@ -90,4 +96,3 @@ npm run build     # Build for production
 npm run preview   # Preview the production build
 npm run format    # Format the app with oxfmt
 ```
-
