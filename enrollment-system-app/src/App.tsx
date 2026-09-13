@@ -61,16 +61,7 @@ import {
   type SubjectSection,
 } from "./lib/system"
 
-const roles: Role[] = [
-  "registrar",
-  "osas",
-  "guidance",
-  "medical",
-  "scholarship",
-  "cashier",
-  "ict",
-  "admin",
-]
+const offices: Office[] = ["registrar", "osas", "guidance", "medical", "scholarship", "cashier", "ict"]
 
 const steps = [
   "Student information",
@@ -115,7 +106,7 @@ type PortalRoute = "overview" | "enroll" | "documents" | "updates" | "queue" | "
 type ActionState = { status: "idle" | "pending" | "success" | "error"; message?: string }
 
 const routeForRole = (role: Role): PortalRoute => role === "student" ? "overview" : "queue"
-const validRoutes = (role: Role): PortalRoute[] => role === "student" ? ["overview", "enroll", "documents", "updates"] : role === "admin" ? ["queue", "activity", "academic"] : ["queue", "activity"]
+const validRoutes = (role: Role): PortalRoute[] => role === "student" ? ["overview", "enroll", "documents", "updates"] : ["queue", "activity", "academic"]
 const readRoute = (role: Role) => {
   const route = location.hash.slice(1) as PortalRoute
   return validRoutes(role).includes(route) ? route : routeForRole(role)
@@ -128,6 +119,7 @@ const staffStatuses = (office: Office) => office === "cashier" ? ["ready", "subm
 const staffStatusFor = (item: Enrollment, office: Office) => office === "cashier" ? item.payment.status : office === "ict" ? item.idStatus : item.offices[office]
 const errorMessage = (reason: unknown, fallback: string) => reason instanceof Error ? reason.message : typeof reason === "object" && reason !== null && "message" in reason ? String(reason.message) : fallback
 const isMissingBackendCapability = (message: string) => message.includes("An administrator must apply the current Supabase migrations")
+const isRetryableError = (message: string) => /network|fetch|timeout|temporar|connection|offline|rate limit/i.test(message)
 const officeLabel = (office: Office) => roleLabel(office)
 const countStatus = (items: Enrollment[], office: Office, status: string) => items.filter((item) => staffStatusFor(item, office) === status).length
 const officeComplete = (item: Enrollment, office: Office) => office === "cashier" ? item.payment.status === "confirmed" : office === "ict" ? ["ready", "completed"].includes(item.idStatus) : item.offices[office] === "cleared"
@@ -143,6 +135,7 @@ export default function App() {
   useEffect(() => {
     restoreProfile()
       .then(setProfile)
+      .catch(() => setProfile(null))
       .finally(() => setLoading(false))
   }, [])
 
@@ -254,7 +247,7 @@ function Auth({
     setForm({
       ...form,
       email: `${role}@demo.chmsu.edu.ph`,
-      password: "Staff123!",
+      password: role === "student" ? "Student123!" : "Staff123!",
     })
 
   const switchMode = (next: "signin" | "freshman" | "access") => {
@@ -271,7 +264,7 @@ function Auth({
     <div className="auth-page">
       <header className="university-header">
         <div className="university-identity"><GraduationCap aria-hidden="true" /><div><strong>Carlos Hilado Memorial State University</strong><span>Office of the Registrar</span></div></div>
-        <span className="portal-label">Student & staff services</span>
+        <span className="portal-label">Student & administrator services</span>
       </header>
       <section className="auth-intro"><p className="eyebrow">CHMSU / ENROLLMENT</p><h1>Online enrollment</h1><p>Access your enrollment record, submit requirements, and check office clearances.</p></section>
       <main className="auth-panel">
@@ -474,7 +467,7 @@ function Auth({
               <summary>Demo accounts</summary>
               <p>Student: student@demo.chmsu.edu.ph / Student123!</p>
               <div className="demo-roles">
-                {roles.map((role) => (
+                {(["student", "admin"] as Role[]).map((role) => (
                   <button key={role} onClick={() => chooseDemo(role)}>
                     {roleLabel(role)}
                   </button>
@@ -584,7 +577,16 @@ function Portal({ profile, onExit }: { profile: Profile; onExit: () => void }) {
     return () => { void client.removeChannel(channel) }
   }, [profile.id])
 
-  const persist = async (item: Enrollment, action = "save") => { await saveEnrollment(item, action, profile.role); await reload(true); setDirty(false) }
+  const persist = async (item: Enrollment, action = "save", office?: Office) => {
+    await saveEnrollment(item, action, profile.role, office)
+    try {
+      setItems(await getEnrollments(profile))
+      setLoadError("")
+    } catch {
+      throw new Error("Your change was saved, but the latest record could not be loaded. Refresh the page before trying again.")
+    }
+    setDirty(false)
+  }
   const navigate = (next: PortalRoute) => { if (location.hash !== `#${next}`) location.hash = next; setMobile(false) }
   const navItems = profile.role === "student" ? [
     ["overview", <LayoutDashboard />, "Enrollment overview"], ["enroll", <ClipboardList />, "Enrollment form"], ["documents", <FileText />, "Documents"], ["updates", <Bell />, "Activity"],
@@ -645,11 +647,7 @@ function Portal({ profile, onExit }: { profile: Profile; onExit: () => void }) {
             <section className="card state-card"><Alert tone="error">{loadError}</Alert>{!isMissingBackendCapability(loadError) && <button className="secondary" onClick={() => void reload(true)}>Retry</button>}</section>
           ) : profile.role === "student" ? (
             <StudentPortal item={items[0]} persist={persist} route={route} onNavigate={navigate} onDirtyChange={setDirty} updateAvailable={updateAvailable} onRefresh={() => { setDirty(false); void reload(true) }} />
-          ) : profile.role === "admin" ? (
-            route === "academic" ? <AdminPortal items={items} /> : route === "activity" ? <ActivityHistory items={items} /> : <AdminDashboard items={items} />
-          ) : (
-            route === "activity" ? <ActivityHistory items={items} /> : <StaffPortal profile={profile} items={items} persist={persist} />
-          )}
+          ) : route === "academic" ? <AdminPortal items={items} /> : route === "activity" ? <ActivityHistory items={items} /> : <StaffPortal items={items} persist={persist} />}
         </main>
       </div>
     </div>
@@ -666,7 +664,7 @@ function StudentPortal({
   onRefresh,
 }: {
   item?: Enrollment
-  persist: (item: Enrollment, action?: string) => Promise<void>
+  persist: (item: Enrollment, action?: string, office?: Office) => Promise<void>
   route: PortalRoute
   onNavigate: (route: PortalRoute) => void
   onDirtyChange: (dirty: boolean) => void
@@ -722,7 +720,7 @@ function StudentPortal({
     } catch (reason) {
       const error = errorMessage(reason, "The change could not be saved.")
       setSaveState({ status: "error", message: error })
-      if (!isMissingBackendCapability(error)) lastSave.current = () => save(next, action, message)
+      if (isRetryableError(error)) lastSave.current = () => save(next, action, message)
       throw reason
     }
   }
@@ -965,12 +963,13 @@ function EnrollmentWizard({
             setItem={setItem}
             item={item}
             errors={errors}
+            locked={item.offices.registrar === "cleared"}
           />
         )}{" "}
         {activeStep === 2 && (
-          <RequirementUpload item={item} upload={upload} busy={busy} />
+          <RequirementUpload item={item} upload={upload} busy={busy} locked={item.offices.registrar === "cleared"} />
         )}{" "}
-        {activeStep === 3 && <Payment item={item} upload={upload} busy={busy} />}{" "}
+        {activeStep === 3 && <Payment item={item} upload={upload} busy={busy} locked={item.payment.status === "confirmed" || item.payment.status === "verifying"} />}{" "}
         {activeStep === 4 && <OfficeClearances item={item} />}{" "}
         {activeStep === 5 && <IdProcessing item={item} />}{" "}
         {activeStep === 6 && <FinalReview item={item} references={references} />}
@@ -1010,6 +1009,7 @@ function StudentInfo({
   setItem,
   item,
   errors,
+  locked,
 }: {
   form: StudentForm
   academic: Enrollment["academic"]
@@ -1018,6 +1018,7 @@ function StudentInfo({
   setItem: (item: Enrollment) => void
   item: Enrollment
   errors: Record<string, string>
+  locked: boolean
 }) {
   const fields: Array<[keyof StudentForm, string, string]> = [
     ["fullName", "Full name", "text"],
@@ -1091,34 +1092,35 @@ function StudentInfo({
           another campus or ask an administrator to configure one.
         </Alert>
       )}
+      {locked && <Alert tone="info">The Registrar has cleared this information. It can be changed only if the record is returned for correction.</Alert>}
       <section className="form-section">
         <h3>Academic information</h3>
         <div className="form-grid">
           <Field label="Student type" error={errors.studentType}>
-            <select value={academic.studentType} onChange={(e) => updateAcademic({ studentType: e.target.value as Enrollment["academic"]["studentType"] })}>
+            <select disabled={locked} value={academic.studentType} onChange={(e) => updateAcademic({ studentType: e.target.value as Enrollment["academic"]["studentType"] })}>
               {["freshman", "transferee", "continuing", "returning"].map((v) => <option key={v} value={v}>{stateLabel(v)}</option>)}
             </select>
           </Field>
           <Field label="Academic status" error={errors.academicStatus}>
-            <select value={form.academicStatus} onChange={(e) => update("academicStatus", e.target.value)}><option value="regular">Regular</option><option value="irregular">Irregular</option></select>
+            <select disabled={locked} value={form.academicStatus} onChange={(e) => update("academicStatus", e.target.value)}><option value="regular">Regular</option><option value="irregular">Irregular</option></select>
           </Field>
           <Field label="Campus" error={errors.campusId}>
-            <select value={academic.campusId ?? ""} onChange={(e) => updateAcademic({ campusId: e.target.value || null, programId: null })}>
+            <select disabled={locked} value={academic.campusId ?? ""} onChange={(e) => updateAcademic({ campusId: e.target.value || null, programId: null })}>
               <option value="">Select campus…</option>{references?.campuses.map((campus) => <option key={campus.id} value={campus.id}>{campus.name}</option>)}
             </select>
           </Field>
           <Field label="Program" error={errors.programId}>
-            <select value={academic.programId ?? ""} disabled={!selectedCampus} onChange={(e) => updateAcademic({ programId: e.target.value || null })}>
+            <select value={academic.programId ?? ""} disabled={locked || !selectedCampus} onChange={(e) => updateAcademic({ programId: e.target.value || null })}>
               <option value="">{selectedCampus ? "Select program…" : "Select campus first"}</option>{programs.map((program) => <option key={program.id} value={program.id}>{program.name} · {program.college}</option>)}
             </select>
           </Field>
           <Field label="Enrollment term" error={errors.termId}>
-            <select value={academic.termId ?? ""} onChange={(e) => updateAcademic({ termId: e.target.value || null })}>
+            <select disabled={locked} value={academic.termId ?? ""} onChange={(e) => updateAcademic({ termId: e.target.value || null })}>
               <option value="">Select term…</option>{openTerms.map((term) => <option key={term.id} value={term.id}>{term.academicYear} · {term.semester}</option>)}
             </select>
           </Field>
           <Field label="Year level" error={errors.yearLevel}>
-            <select value={academic.yearLevel ?? ""} onChange={(e) => updateAcademic({ yearLevel: e.target.value ? Number(e.target.value) : null })}>
+            <select disabled={locked} value={academic.yearLevel ?? ""} onChange={(e) => updateAcademic({ yearLevel: e.target.value ? Number(e.target.value) : null })}>
               <option value="">Select year level…</option>{[1, 2, 3, 4, 5].map((value) => <option key={value} value={value}>{value}{value === 1 ? "st" : value === 2 ? "nd" : value === 3 ? "rd" : "th"} Year</option>)}
             </select>
           </Field>
@@ -1127,15 +1129,15 @@ function StudentInfo({
       <section className="form-section">
         <h3>Personal information</h3>
         <div className="form-grid">
-          {fields.slice(0, 3).map(([key, label, type]) => <Field key={key} label={label} error={errors[key]}><input required type={type} value={form[key]} onChange={(e) => update(key, e.target.value)} /></Field>)}
-          <Field label="Home address" error={errors.address}><input required type="text" value={form.address} onChange={(e) => update("address", e.target.value)} /></Field>
+          {fields.slice(0, 3).map(([key, label, type]) => <Field key={key} label={label} error={errors[key]}><input required disabled={locked} type={type} value={form[key]} onChange={(e) => update(key, e.target.value)} /></Field>)}
+          <Field label="Home address" error={errors.address}><input required disabled={locked} type="text" value={form.address} onChange={(e) => update("address", e.target.value)} /></Field>
         </div>
       </section>
       <section className="form-section">
         <h3>Contact information</h3>
         <div className="form-grid">
-          {fields.slice(3, 5).map(([key, label, type]) => <Field key={key} label={label} error={errors[key]}><input required type={type} value={form[key]} onChange={(e) => update(key, e.target.value)} /></Field>)}
-          {fields.slice(6).map(([key, label, type]) => <Field key={key} label={label} error={errors[key]}><input required type={type} value={form[key]} onChange={(e) => update(key, e.target.value)} /></Field>)}
+          {fields.slice(3, 5).map(([key, label, type]) => <Field key={key} label={label} error={errors[key]}><input required disabled={locked} type={type} value={form[key]} onChange={(e) => update(key, e.target.value)} /></Field>)}
+          {fields.slice(6).map(([key, label, type]) => <Field key={key} label={label} error={errors[key]}><input required disabled={locked} type={type} value={form[key]} onChange={(e) => update(key, e.target.value)} /></Field>)}
         </div>
       </section>
     </>
@@ -1146,13 +1148,16 @@ function RequirementUpload({
   item,
   upload,
   busy,
+  locked,
 }: {
   item: Enrollment
   upload: (office: string, key: string, file?: File) => void
   busy: boolean
+  locked: boolean
 }) {
   return (
     <div className="upload-list">
+      {locked && <Alert tone="info">Registrar documents are locked after clearance.</Alert>}
       {requirements[item.form.studentType].map((name, index) => (
         <label className="upload-row" key={name}>
           <div className="file-icon">
@@ -1170,7 +1175,7 @@ function RequirementUpload({
           </div>
           <Status value={item.documents[name] ? "uploaded" : "pending"} />
           <input
-            disabled={busy}
+            disabled={busy || locked}
             type="file"
             accept=".pdf,.jpg,.jpeg,.png"
             onChange={(e) => upload("registrar", name, e.target.files?.[0])}
@@ -1186,10 +1191,12 @@ function Payment({
   item,
   upload,
   busy,
+  locked,
 }: {
   item: Enrollment
   upload: (office: string, key: string, file?: File) => void
   busy: boolean
+  locked: boolean
 }) {
   return (
     <div className="payment-grid">
@@ -1221,7 +1228,7 @@ function Payment({
           <strong>{item.payment.proof ? documentFilename(item.payment.proof) : "Choose payment proof"}</strong>
           <span>PDF, JPG or PNG · max 10 MB</span>
           <input
-            disabled={busy}
+            disabled={busy || locked}
             type="file"
             accept=".pdf,.jpg,.jpeg,.png"
             onChange={(e) =>
@@ -1338,13 +1345,11 @@ function Confirmed({ item, termLabel }: { item: Enrollment; termLabel: string })
 }
 
 function StaffPortal({
-  profile,
   items,
   persist,
 }: {
-  profile: Profile
   items: Enrollment[]
-  persist: (item: Enrollment, action?: string) => Promise<void>
+  persist: (item: Enrollment, action?: string, office?: Office) => Promise<void>
 }) {
   const [query, setQuery] = useState("")
   const [status, setStatus] = useState("")
@@ -1360,8 +1365,8 @@ function StaffPortal({
   const [decisionState, setDecisionState] = useState<ActionState>({ status: "idle" })
   const [lastDecision, setLastDecision] = useState<"approve" | "return" | "release" | null>(null)
   const drawerRef = useRef<HTMLElement>(null)
-  const office = profile.role as Office
-  const visibleDocuments = (item: Enrollment) => Object.entries(item.documents).filter(([name]) => profile.role === "medical" ? documentOffice(name) === "medical" : documentOffice(name) !== "medical")
+  const [office, setOffice] = useState<Office>("registrar")
+  const visibleDocuments = (item: Enrollment) => Object.entries(item.documents)
 
   useEffect(() => {
     if (!selected) return
@@ -1381,7 +1386,7 @@ function StaffPortal({
 
   useEffect(() => {
     if (
-      profile.role !== "registrar" ||
+      office !== "registrar" ||
       !selected?.academic.programId ||
       !selected.academic.termId
     ) {
@@ -1408,7 +1413,7 @@ function StaffPortal({
         ),
       )
   }, [
-    profile.role,
+    office,
     selected?.id,
     selected?.academic.programId,
     selected?.academic.termId,
@@ -1435,7 +1440,7 @@ function StaffPortal({
   const programOptions = [...new Set(items.map((item) => item.form.program).filter(Boolean))]
 
   const assign = async () => {
-    if (!selected || profile.role !== "registrar") return
+    if (!selected || office !== "registrar") return
 
     if (!selected.academic.programId || !selected.academic.termId)
       return setSectionError(
@@ -1465,7 +1470,7 @@ function StaffPortal({
   }
 
   const clearAssignments = async () => {
-    if (!selected || profile.role !== "registrar") return
+    if (!selected || office !== "registrar") return
     setSectionBusy(true)
     setSectionError("")
     try {
@@ -1483,7 +1488,7 @@ function StaffPortal({
     if (!selected) return
     if (decisionState.status === "pending") return
     if (
-      profile.role === "registrar" &&
+      office === "registrar" &&
       decision === "approve" &&
       (!selected.subjects.length ||
         selected.subjects.some((subject) => !subject.sectionId))
@@ -1492,7 +1497,7 @@ function StaffPortal({
         "Save real term sections before approving this enrollment. Existing labels without section IDs are not treated as valid assignments.",
       )
     let next = structuredClone(selected)
-    const label = roleLabel(profile.role)
+    const label = roleLabel(office)
     if (office === "cashier")
       next.payment =
         decision === "approve"
@@ -1518,12 +1523,14 @@ function StaffPortal({
     setLastDecision(decision)
     setDecisionState({ status: "pending", message: decision === "approve" ? "Saving decision…" : "Returning record…" })
     try {
-      await persist(next, decision)
+      await persist(next, decision, office)
       setDecisionState({ status: "success", message: "Decision saved." })
       setSelected(null)
       setRemark("")
     } catch (reason) {
-      setDecisionState({ status: "error", message: reason instanceof Error ? reason.message : "Decision could not be saved." })
+      const message = errorMessage(reason, "Decision could not be saved.")
+      if (!isRetryableError(message)) setLastDecision(null)
+      setDecisionState({ status: "error", message })
     }
   }
 
@@ -1551,7 +1558,7 @@ function StaffPortal({
     setLastDecision("release")
     setDecisionState({ status: "pending", message: "Releasing enrollment form…" })
     try {
-      await persist(next, "release")
+      await persist(next, "release", "registrar")
       setDecisionState({ status: "success", message: "Enrollment form released." })
       setSelected(null)
     } catch (reason) {
@@ -1573,6 +1580,14 @@ function StaffPortal({
         </div>
       </div>
       <StaffDashboardByRole role={office} items={items} filteredCount={filtered.length} />
+      <div className="toolbar">
+        <label>
+          Workflow office
+          <select value={office} onChange={(event) => { setOffice(event.target.value as Office); setSelected(null); setStatus("") }}>
+            {offices.map((value) => <option key={value} value={value}>{officeLabel(value)}</option>)}
+          </select>
+        </label>
+      </div>
       <ActionFeedback state={decisionState} onRetry={lastDecision === "release" && selected ? release : (lastDecision === "approve" || lastDecision === "return") && selected ? () => void act(lastDecision) : undefined} />
       <div className="toolbar">
         <label>
@@ -1668,14 +1683,14 @@ function StaffPortal({
               />
               <Stat value={stateLabel(selected.status)} label="Enrollment" />
             </div>
-            {profile.role === "cashier" && <div className="record-rows"><RecordRow label="Insurance fee" value="₱125.00" /><RecordRow label="Receipt" value={selected.payment.receipt || "Not issued"} /></div>}
-            {profile.role === "ict" && <div className="record-rows"><RecordRow label="ID status" value={stateLabel(selected.idStatus)} /><RecordRow label="Student number" value={selected.studentNumber || "Pending assignment"} /></div>}
+            {office === "cashier" && <div className="record-rows"><RecordRow label="Insurance fee" value="₱125.00" /><RecordRow label="Receipt" value={selected.payment.receipt || "Not issued"} /></div>}
+            {office === "ict" && <div className="record-rows"><RecordRow label="ID status" value={stateLabel(selected.idStatus)} /><RecordRow label="Student number" value={selected.studentNumber || "Pending assignment"} /></div>}
             <div className="document-summary">
-              <h3>{profile.role === "medical" ? "Medical documents" : "Submitted documents"}</h3>
+              <h3>Submitted documents</h3>
               {visibleDocuments(selected).map(([name]) => <span key={name}><FileText />{name}</span>)}
-              {!visibleDocuments(selected).length && <small>{profile.role === "medical" ? "No medical documents submitted." : "Medical documents are restricted to Medical Services."}</small>}
+              {!visibleDocuments(selected).length && <small>No documents submitted.</small>}
             </div>
-            {profile.role === "registrar" && (
+            {office === "registrar" && (
               <div className="subject-assignment">
                 <h3>Subject sections</h3>
                 {sectionError && <Alert tone="error">{sectionError}</Alert>}
@@ -1730,7 +1745,7 @@ function StaffPortal({
                 )}
               </div>
             )}
-            {profile.role === "scholarship" && (
+            {office === "scholarship" && (
               <div className="subject-assignment">
                 <h3>Scholarship assessment</h3>
                 <Field label="Free Higher Education status">
@@ -1773,7 +1788,7 @@ function StaffPortal({
                 Approve / clear
               </button>
             </div>
-            {profile.role === "registrar" && (
+            {office === "registrar" && (
               <button className="release" disabled={decisionState.status === "pending"} onClick={() => void release()}>
                 Release enrollment form
               </button>

@@ -43,7 +43,7 @@ select student_user_id, 'student', true, 'authz-student@example.test', 'Authz St
 union all select other_user_id, 'student', true, 'authz-other@example.test', 'Authz Other' from enrollment_authorization_fixtures
 union all select third_user_id, 'student', true, 'authz-third@example.test', 'Authz Third' from enrollment_authorization_fixtures
 union all select inactive_user_id, 'student', false, 'authz-inactive@example.test', 'Authz Inactive' from enrollment_authorization_fixtures
-union all select registrar_user_id, 'registrar', true, 'authz-registrar@example.test', 'Authz Registrar' from enrollment_authorization_fixtures
+union all select registrar_user_id, 'admin', true, 'authz-registrar@example.test', 'Authz Administrator' from enrollment_authorization_fixtures
 union all select osas_user_id, 'osas', true, 'authz-osas@example.test', 'Authz OSAS' from enrollment_authorization_fixtures;
 
 insert into public.students(id, user_id, full_name, contact_details)
@@ -180,7 +180,7 @@ from enrollment_authorization_fixtures;
 set local role authenticated;
 
 select throws_ok(
-  $$select public.transition_enrollment((select incomplete_enrollment_id from enrollment_authorization_fixtures), 'release', '{"student_number":"FORGED"}')$$,
+  $$select public.admin_transition_enrollment((select incomplete_enrollment_id from enrollment_authorization_fixtures), 'release', 'registrar', '{"student_number":"FORGED"}')$$,
   'P0001', 'Enrollment prerequisites are incomplete',
   'incomplete release is rejected server-side');
 
@@ -191,8 +191,8 @@ set local role authenticated;
 
 select throws_ok(
   $$select public.transition_enrollment((select complete_enrollment_id from enrollment_authorization_fixtures), 'release', '{}')$$,
-  'P0001', 'Invalid transition for role',
-  'non-Registrar release is rejected');
+  'P0001', 'Only students and administrators may use this enrollment operation',
+  'legacy office account is rejected');
 
 reset role;
 select set_config('request.jwt.claim.sub', registrar_user_id::text, true)
@@ -200,17 +200,17 @@ from enrollment_authorization_fixtures;
 set local role authenticated;
 
 select lives_ok(
-  $$select public.transition_enrollment((select complete_enrollment_id from enrollment_authorization_fixtures), 'approve', '{"assigned_subjects":[{"code":"FORGED"}],"remarks":{"registrar":"Reviewed"}}')$$,
-  'authorized Registrar approval succeeds without accepting browser subjects');
+  $$select public.admin_transition_enrollment((select complete_enrollment_id from enrollment_authorization_fixtures), 'approve', 'registrar', '{"assigned_subjects":[{"code":"FORGED"}],"remarks":{"registrar":"Reviewed"}}')$$,
+  'administrator approval succeeds without accepting browser subjects');
 
 select is(
   (select assigned_subjects::text from public.enrollments where id = (select complete_enrollment_id from enrollment_authorization_fixtures)),
   '[{"code": "CS 101", "title": "Stored subject", "units": 3}]',
-  'Registrar approval preserves assigned subjects stored in the database');
+  'administrator approval preserves assigned subjects stored in the database');
 
 select lives_ok(
-  $$select public.transition_enrollment((select complete_enrollment_id from enrollment_authorization_fixtures), 'release', '{"student_number":"2026-AUTHZ","assigned_subjects":[{"code":"FORGED"}]}')$$,
-  'authorized Registrar can release a complete enrollment');
+  $$select public.admin_transition_enrollment((select complete_enrollment_id from enrollment_authorization_fixtures), 'release', 'registrar', '{"student_number":"2026-AUTHZ","assigned_subjects":[{"code":"FORGED"}]}')$$,
+  'administrator can release a complete enrollment');
 
 select is(
   (select status from public.enrollments where id = (select complete_enrollment_id from enrollment_authorization_fixtures)),
@@ -218,9 +218,9 @@ select is(
   'authorized release confirms the enrollment');
 
 select is(
-  (select assigned_subjects::text from public.enrollments where id = (select complete_enrollment_id from enrollment_authorization_fixtures)),
-  '[{"code": "CS 101", "title": "Stored subject", "units": 3}]',
-  'Registrar release preserves assigned subjects stored in the database');
+  (select assigned_subjects->0->>'sectionCode' from public.enrollments where id = (select complete_enrollment_id from enrollment_authorization_fixtures)),
+  'AUTHZ-SECTION',
+  'release rebuilds the subject snapshot from canonical assignments');
 
 select * from finish();
 rollback;

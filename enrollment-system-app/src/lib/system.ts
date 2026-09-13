@@ -1,6 +1,6 @@
 import { createClient, type User } from "@supabase/supabase-js"
 
-export type Role = "student" | "registrar" | "osas" | "guidance" | "medical" | "scholarship" | "cashier" | "ict" | "admin"
+export type Role = "student" | "admin"
 
 export type Office = "registrar" | "osas" | "guidance" | "medical" | "scholarship" | "cashier" | "ict"
 
@@ -273,21 +273,12 @@ const demoProfiles: Profile[] = [
     role: "student",
   },
 
-  ...([
-    "registrar",
-    "osas",
-    "guidance",
-    "medical",
-    "scholarship",
-    "cashier",
-    "ict",
-    "admin",
-  ] as Role[]).map((role) => ({
-    id: `${role}-1`,
-    email: `${role}@demo.chmsu.edu.ph`,
-    fullName: `${role[0].toUpperCase()}${role.slice(1)} Officer`,
-    role,
-  })),
+  {
+    id: "admin-1",
+    email: "admin@demo.chmsu.edu.ph",
+    fullName: "Enrollment Administrator",
+    role: "admin",
+  },
 ]
 
 const demoSeed = (): Enrollment[] => {
@@ -395,6 +386,8 @@ export async function profileForUser(user: User): Promise<Profile> {
   if (error) throw error
 
   if (!data.is_active) throw new Error("This account is disabled.")
+  if (data.role !== "student" && data.role !== "admin")
+    throw new Error("This portal now accepts only student and administrator accounts.")
 
   return {
     id: data.id,
@@ -638,6 +631,7 @@ export async function saveEnrollment(
   value: Enrollment,
   action = "save",
   actorRole?: Role,
+  actingOffice?: Office,
 ) {
   if (!supabase) return writeDemoEnrollment(value)
 
@@ -662,6 +656,7 @@ export async function saveEnrollment(
       student_type: value.academic.studentType,
       year_level: value.academic.yearLevel,
     },
+    office: actingOffice,
   }
 
   if (actorRole !== "student") payload.scholarship = value.scholarship
@@ -669,9 +664,9 @@ export async function saveEnrollment(
   if (action === "approve")
     Object.assign(payload, { assigned_subjects: value.subjects })
 
-  const result = actorRole === "scholarship" && action !== "save"
-      ? await supabase.rpc("transition_scholarship_enrollment", { p_enrollment_id: value.id, p_action: action, p_payload: payload })
-      : await supabase.rpc("transition_enrollment", { p_enrollment_id: value.id, p_action: action, p_payload: payload })
+  const result = actorRole === "admin" && action !== "save"
+    ? await supabase.rpc("admin_transition_enrollment", { p_enrollment_id: value.id, p_action: action, p_office: actingOffice, p_payload: payload })
+    : await supabase.rpc("transition_enrollment", { p_enrollment_id: value.id, p_action: action, p_payload: payload })
 
   if (result.error) requireBackendCapability(result.error, action === "save" || action === "submit" ? "transactional enrollment saving" : `${actorRole ?? "staff"} enrollment transitions`)
 }
@@ -971,13 +966,13 @@ export async function clearSubjectSections(enrollmentId: string) {
   if (error) requireBackendCapability(error, "Registrar-controlled assignment clearing")
 }
 
-const specialRoleLabels: Partial<Record<Role, string>> = {
+const specialRoleLabels: Partial<Record<Role | Office, string>> = {
   ict: "ICT-MIS",
   osas: "OSAS",
   scholarship: "Scholarship Assessment",
 }
 
-export const roleLabel = (role: Role) =>
+export const roleLabel = (role: Role | Office) =>
   specialRoleLabels[role] ?? `${role[0].toUpperCase()}${role.slice(1)}`
 
 export const stateLabel = (value: string) =>

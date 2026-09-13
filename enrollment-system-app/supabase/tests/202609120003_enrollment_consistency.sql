@@ -23,7 +23,7 @@ insert into public.profiles(id,role,is_active,email,full_name)
 select student_user_id,'student',true,'consistency-student@example.test','Consistency Student' from consistency_fixtures
 union all select other_user_id,'student',true,'consistency-other@example.test','Other Student' from consistency_fixtures
 union all select inactive_user_id,'student',false,'consistency-inactive@example.test','Inactive Student' from consistency_fixtures
-union all select registrar_user_id,'registrar',true,'consistency-registrar@example.test','Consistency Registrar' from consistency_fixtures;
+union all select registrar_user_id,'admin',true,'consistency-registrar@example.test','Consistency Administrator' from consistency_fixtures;
 insert into public.students(user_id,full_name,contact_details)
 select student_user_id,'Consistency Student','{}' from consistency_fixtures
 union all select other_user_id,'Other Student','{}' from consistency_fixtures;
@@ -67,16 +67,16 @@ select lives_ok($$select public.transition_enrollment((select enrollment_id from
 reset role;
 select set_config('request.jwt.claim.sub',registrar_user_id::text,true) from consistency_fixtures;
 set local role authenticated;
-select public.transition_enrollment((select enrollment_id from consistency_fixtures),'return','{"remarks":{"registrar":"Correct year"}}');
+select public.admin_transition_enrollment((select enrollment_id from consistency_fixtures),'return','registrar','{"remarks":{"registrar":"Correct year"}}');
 insert into public.sections(term_id,subject_id,program_id,section_code,schedule,room,capacity)
 select f.term_id,s.id,f.program_id,'CONSISTENCY-SECTION','Monday 10:00-11:00','TEST',2 from consistency_fixtures f cross join lateral(select id from public.subjects limit 1) s
 on conflict(term_id,subject_id,section_code) do update set capacity=excluded.capacity returning id;
 update consistency_fixtures set section_id=(select s.id from public.sections s where s.section_code='CONSISTENCY-SECTION' and s.term_id=term_id and s.program_id=program_id);
-select lives_ok($$select public.assign_enrollment_subject_sections((select enrollment_id from consistency_fixtures),array[(select section_id from consistency_fixtures)])$$,'Registrar assigns a canonical section');
+select lives_ok($$select public.assign_enrollment_subject_sections((select enrollment_id from consistency_fixtures),array[(select section_id from consistency_fixtures)])$$,'administrator assigns a canonical section');
 select throws_ok($$select public.save_enrollment_academics((select enrollment_id from consistency_fixtures),(select campus_id from consistency_fixtures),(select program_id from consistency_fixtures),(select term_id from consistency_fixtures),'continuing',2,'{}')$$,
   'P0001','Clear existing subject assignments before changing academic data','academic change is rejected while assignments exist');
-select lives_ok($$select public.clear_enrollment_subject_sections((select enrollment_id from consistency_fixtures))$$,'Registrar can clear assignments before correction');
-select lives_ok($$select public.save_enrollment_academics((select enrollment_id from consistency_fixtures),(select campus_id from consistency_fixtures),(select program_id from consistency_fixtures),(select term_id from consistency_fixtures),'continuing',2,'{}')$$,'Registrar can correct an unconfirmed record after clearing assignments');
+select lives_ok($$select public.clear_enrollment_subject_sections((select enrollment_id from consistency_fixtures))$$,'administrator can clear assignments before correction');
+select lives_ok($$select public.save_enrollment_academics((select enrollment_id from consistency_fixtures),(select campus_id from consistency_fixtures),(select program_id from consistency_fixtures),(select term_id from consistency_fixtures),'continuing',2,'{}')$$,'administrator can correct an unconfirmed record after clearing assignments');
 
 select * from finish();
 rollback;

@@ -7,8 +7,9 @@ begin
     ('public.enrollments.campus_id'),('public.enrollments.scholarship'),('public.sections.schedule_data'),
     ('public.enrollment_academic_reviews'),('public.enrollment_section_assignments'),('public.enrollment_transition_authorizations'),
     ('public.save_enrollment_academics(uuid,uuid,uuid,uuid,text,integer,jsonb)'),
-    ('public.transition_enrollment(uuid,text,jsonb)'),('public.get_staff_document_manifests(uuid[])'),
-    ('public.clear_enrollment_subject_sections(uuid)')
+    ('public.transition_enrollment(uuid,text,jsonb)'),('public.admin_transition_enrollment(uuid,text,text,jsonb)'),
+    ('public.get_staff_document_manifests(uuid[])'),('public.get_available_subject_sections(uuid,uuid)'),
+    ('public.assign_enrollment_subject_sections(uuid,uuid[])'),('public.clear_enrollment_subject_sections(uuid)')
   ) required(name)
   where case
     when required.name like '%.%.%' then to_regclass(split_part(required.name,'.',1)||'.'||split_part(required.name,'.',2)) is null
@@ -20,6 +21,11 @@ begin
   if has_column_privilege('authenticated','public.enrollments','documents','SELECT') then
     raise exception 'Document privacy check failed: authenticated still has direct SELECT on enrollments.documents';
   end if;
+  if has_function_privilege('authenticated','public.transition_enrollment_legacy_internal(uuid,text,jsonb)','EXECUTE') then
+    raise exception 'Legacy staff transition is still executable by authenticated users';
+  end if;
+  if (select prosrc from pg_proc where oid='public.assign_enrollment_subject_sections(uuid,uuid[])'::regprocedure)
+    not like '%admin%' then raise exception 'Subject assignment is not administrator-controlled'; end if;
   if not exists(select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='enrollments') then
     raise exception 'Realtime publication is missing public.enrollments';
   end if;

@@ -9,7 +9,7 @@ npm install
 npm run dev
 ```
 
-Without environment variables, the app runs in local demo mode. Use `student@demo.chmsu.edu.ph` / `Student123!`, or select a staff role and use `Staff123!`.
+Without environment variables, the app runs in local demo mode. Use `student@demo.chmsu.edu.ph` / `Student123!` or `admin@demo.chmsu.edu.ph` / `Staff123!`.
 
 ## Connect an existing Supabase project
 
@@ -21,7 +21,7 @@ The migrations are additive and require the existing foundational `public.profil
 4. Apply `202609120003_enrollment_consistency_repair.sql` in one transaction. Its only backfill derives `campus_id` for unconfirmed records with a canonical program campus; ambiguous records are added to `enrollment_academic_reviews`.
 5. After commit, the migration asks PostgREST to reload its schema. Run `supabase/audits/202609120004_deployment_check.sql`; do not deploy the app unless it succeeds.
 6. Copy `.env.example` to `.env.local` and fill in the project URL and publishable key. Never put the service-role key in the browser app.
-7. In Supabase Authentication, create staff users and update their `public.profiles.role` to `registrar`, `osas`, `guidance`, `medical`, `scholarship`, `cashier`, `ict`, or `admin` from a trusted SQL session.
+7. In Supabase Authentication, create administrator users and update their `public.profiles.role` to `admin` from a trusted SQL session. Registrar, OSAS, Guidance, Medical, Scholarship, Cashier, and ICT are workflow views selected inside the administrator dashboard—not authentication roles.
 8. Configure the Site URL and email redirect URLs for sign-up confirmation and password recovery.
 
 Run database tests with `supabase test db`, then run `npm run build`. The SQL tests roll back their fixtures.

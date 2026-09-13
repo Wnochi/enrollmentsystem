@@ -28,7 +28,7 @@ from staff_dashboard_fixtures;
 
 insert into public.profiles(id, role, is_active, email, full_name)
 select student_user_id, 'student', true, 'dashboard-student@example.test', 'Dashboard Student' from staff_dashboard_fixtures
-union all select scholarship_user_id, 'scholarship', true, 'dashboard-scholarship@example.test', 'Dashboard Scholarship' from staff_dashboard_fixtures
+union all select scholarship_user_id, 'admin', true, 'dashboard-scholarship@example.test', 'Dashboard Administrator' from staff_dashboard_fixtures
 union all select medical_user_id, 'medical', true, 'dashboard-medical@example.test', 'Dashboard Medical' from staff_dashboard_fixtures;
 
 insert into public.students(user_id, full_name, contact_details)
@@ -56,15 +56,18 @@ set local role authenticated;
 
 select lives_ok(
   $$select public.transition_scholarship_enrollment((select enrollment_id from staff_dashboard_fixtures), 'approve', '{"scholarship":{"fheStatus":"eligible","additionalAwards":["CHMSU Internal Scholarship"],"assistanceStatus":"pending","notes":"Reviewed"},"remarks":{"scholarship":"Reviewed"}}')$$,
-  'Scholarship staff can save an assessment');
+  'administrator can save a scholarship assessment');
 select is((select scholarship->>'fheStatus' from public.enrollments where id = (select enrollment_id from staff_dashboard_fixtures)), 'eligible', 'Scholarship assessment is persisted');
 select is((select office_statuses->>'scholarship' from public.enrollments where id = (select enrollment_id from staff_dashboard_fixtures)), 'cleared', 'Scholarship approval clears only the scholarship office');
-select is((select documents::text from public.get_staff_document_manifests(array[(select enrollment_id from staff_dashboard_fixtures)])), '{"Report Card": "enrollment-files/test.pdf"}', 'Non-medical staff receive only non-medical document manifests');
+select is((select documents from public.get_staff_document_manifests(array[(select enrollment_id from staff_dashboard_fixtures)])), '{"Medical certificate":"medical-files/test.pdf","Report Card":"enrollment-files/test.pdf"}'::jsonb, 'administrator receives the complete document manifest');
 
 reset role;
 select set_config('request.jwt.claim.sub', medical_user_id::text, true) from staff_dashboard_fixtures;
 set local role authenticated;
-select is((select documents::text from public.get_staff_document_manifests(array[(select enrollment_id from staff_dashboard_fixtures)])), '{"Medical certificate": "medical-files/test.pdf"}', 'Medical staff receive medical document manifests');
+select throws_ok(
+  $$select public.get_staff_document_manifests(array[(select enrollment_id from staff_dashboard_fixtures)])$$,
+  'P0001', 'Account is inactive or not authorized',
+  'legacy Medical account is rejected');
 
 reset role;
 select set_config('request.jwt.claim.sub', student_user_id::text, true) from staff_dashboard_fixtures;
